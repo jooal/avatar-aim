@@ -10,6 +10,7 @@ interface ElectronAPI {
   setIgnoreMouseEvents: (ignore: boolean) => void;
   onHangoutUpdate: (callback: (data: unknown) => void) => void;
   onAvatarPositionUpdate: (callback: (data: unknown) => void) => void;
+  requestHangoutData: () => void;
 }
 
 declare global {

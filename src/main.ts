@@ -9,6 +9,7 @@ if (started) {
 
 let mainWindow: BrowserWindow | null = null;
 let hangoutWindow: BrowserWindow | null = null;
+let currentHangoutData: { conversationId: string; participants: unknown[] } | null = null;
 
 const createWindow = () => {
   // Create the browser window.
@@ -36,9 +37,14 @@ const createWindow = () => {
 };
 
 const createHangoutWindow = (conversationId: string, participants: unknown[]) => {
-  // Close existing hangout window if any
+  // Store the hangout data for later retrieval
+  currentHangoutData = { conversationId, participants };
+
+  // If window already exists, just send updated data instead of recreating
   if (hangoutWindow && !hangoutWindow.isDestroyed()) {
-    hangoutWindow.close();
+    console.log('[Main] Hangout window exists, sending update only');
+    hangoutWindow.webContents.send('hangout-update', { conversationId, participants });
+    return;
   }
 
   // Get primary display dimensions
@@ -65,25 +71,32 @@ const createHangoutWindow = (conversationId: string, participants: unknown[]) =>
     },
   });
 
-  // Make the window click-through by default, but avatars will capture clicks
-  hangoutWindow.setIgnoreMouseEvents(true, { forward: true });
+  // Make the window click-through by default
+  // The renderer will toggle this when hovering over interactive elements
+  hangoutWindow.setIgnoreMouseEvents(true);
 
   // Load the hangout overlay page
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    hangoutWindow.loadURL(`${MAIN_WINDOW_VITE_DEV_SERVER_URL}#/hangout`);
+    hangoutWindow.loadURL(`${MAIN_WINDOW_VITE_DEV_SERVER_URL}?hangout=true`);
   } else {
     hangoutWindow.loadFile(
       path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`),
-      { hash: '/hangout' }
+      { query: { hangout: 'true' } }
     );
   }
 
   // Send initial data to hangout window once loaded
   hangoutWindow.webContents.once('did-finish-load', () => {
+    console.log('[Main] Hangout window loaded, sending update:', { conversationId, participants });
     hangoutWindow?.webContents.send('hangout-update', {
       conversationId,
       participants
     });
+
+    // Open devtools in development
+    if (process.env.NODE_ENV === 'development') {
+      hangoutWindow?.webContents.openDevTools({ mode: 'detach' });
+    }
   });
 
   hangoutWindow.on('closed', () => {
@@ -113,7 +126,20 @@ ipcMain.on('update-avatar-position', (_event, { x, y }) => {
 // Handle mouse events for the hangout window
 ipcMain.on('set-ignore-mouse-events', (_event, ignore: boolean) => {
   if (hangoutWindow && !hangoutWindow.isDestroyed()) {
-    hangoutWindow.setIgnoreMouseEvents(ignore, { forward: true });
+    if (ignore) {
+      hangoutWindow.setIgnoreMouseEvents(true);
+    } else {
+      // When not ignoring, we need forward:true to detect when mouse leaves
+      hangoutWindow.setIgnoreMouseEvents(false);
+    }
+  }
+});
+
+// Handle request for hangout data from overlay
+ipcMain.on('request-hangout-data', () => {
+  console.log('[Main] Hangout data requested, sending:', currentHangoutData);
+  if (hangoutWindow && !hangoutWindow.isDestroyed() && currentHangoutData) {
+    hangoutWindow.webContents.send('hangout-update', currentHangoutData);
   }
 });
 
