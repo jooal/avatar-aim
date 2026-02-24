@@ -344,7 +344,26 @@
         </div>
       </div>
 
-      <p class="text-sm text-gray-500">Version 1.0.0 &middot; Free forever &middot; No account required to download</p>
+      <p class="text-sm text-gray-500 mb-8">Version 1.0.0 &middot; Free forever &middot; No account required to download</p>
+
+      <!-- Mac Installation Help -->
+      <div class="max-w-xl mx-auto p-6 bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 text-left">
+        <div class="flex items-start gap-3 mb-4">
+          <span class="text-2xl">&#9888;&#65039;</span>
+          <div>
+            <h3 class="font-bold text-white mb-1">Mac showing "app is damaged"?</h3>
+            <p class="text-gray-400 text-sm">macOS blocks apps from unidentified developers. Here's how to fix it:</p>
+          </div>
+        </div>
+        <ol class="text-sm text-gray-300 space-y-3 ml-9">
+          <li><span class="text-yellow-400 font-bold">1.</span> Open <strong>Terminal</strong> (search for it in Spotlight)</li>
+          <li><span class="text-yellow-400 font-bold">2.</span> Run this command:
+            <code class="block mt-2 p-3 bg-black/40 rounded-lg text-green-400 font-mono text-xs break-all">xattr -cr ~/Downloads/AvatarAIM.dmg</code>
+          </li>
+          <li><span class="text-yellow-400 font-bold">3.</span> Double-click the DMG again to install</li>
+        </ol>
+        <p class="text-xs text-gray-500 mt-4 ml-9">This removes the quarantine flag that macOS adds to downloaded files.</p>
+      </div>
     </div>
   </section>
 
