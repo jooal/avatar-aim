@@ -980,10 +980,13 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
   }, [conversation.id]);
 
   async function loadHangoutParticipants() {
-    const { data } = await supabase
+    console.log('[App] Loading hangout participants for conversation:', conversation.id);
+    const { data, error } = await supabase
       .from('hangout_sessions')
       .select('*')
       .eq('conversation_id', conversation.id);
+
+    console.log('[App] Hangout sessions data:', data, 'error:', error);
 
     if (data) {
       // Get profiles for participants
@@ -998,11 +1001,13 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
         profile: profiles?.find(p => p.id === h.user_id)
       }));
 
+      console.log('[App] Participants with profiles:', participantsWithProfiles);
       setHangoutParticipants(participantsWithProfiles);
       setIsInHangout(data.some(h => h.user_id === currentUserId));
 
       // If user is in hangout, open the overlay window
       if (data.some(h => h.user_id === currentUserId)) {
+        console.log('[App] Opening hangout window with participants:', participantsWithProfiles);
         window.electronAPI?.openHangoutWindow?.(conversation.id, participantsWithProfiles);
       }
     }
@@ -1010,16 +1015,26 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
 
   async function joinHangout() {
     setJoiningHangout(true);
+    console.log('[App] Joining hangout for conversation:', conversation.id, 'user:', currentUserId);
     try {
-      await supabase.from('hangout_sessions').insert({
+      const { data, error } = await supabase.from('hangout_sessions').insert({
         conversation_id: conversation.id,
         user_id: currentUserId,
         avatar_x: 100 + Math.random() * 200,
         avatar_y: 100 + Math.random() * 100
-      });
-      setIsInHangout(true);
+      }).select();
+
+      console.log('[App] Join hangout result:', data, 'error:', error);
+
+      if (error) {
+        console.error('[App] Failed to join hangout:', error);
+      } else {
+        setIsInHangout(true);
+        // Manually load participants after joining
+        await loadHangoutParticipants();
+      }
     } catch (error) {
-      console.error('Failed to join hangout:', error);
+      console.error('[App] Failed to join hangout:', error);
     }
     setJoiningHangout(false);
   }

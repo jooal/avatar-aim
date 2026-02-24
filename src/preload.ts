@@ -23,5 +23,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   onAvatarPositionUpdate: (callback: (data: unknown) => void) => {
     ipcRenderer.on('avatar-position-update', (_event, data) => callback(data));
+  },
+  requestHangoutData: () => {
+    ipcRenderer.send('request-hangout-data');
   }
 });
