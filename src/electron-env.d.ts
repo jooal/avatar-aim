@@ -4,6 +4,7 @@ declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
 declare const MAIN_WINDOW_VITE_NAME: string;
 
 interface ElectronAPI {
+  openChatWindow: (conversationId: string, conversationName: string) => void;
   openHangoutWindow: (conversationId: string, participants: unknown[]) => void;
   closeHangoutWindow: () => void;
   updateAvatarPosition: (x: number, y: number) => void;

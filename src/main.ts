@@ -9,15 +9,19 @@ if (started) {
 
 let mainWindow: BrowserWindow | null = null;
 let hangoutWindow: BrowserWindow | null = null;
+const chatWindows: Map<string, BrowserWindow> = new Map();
 
 const createWindow = () => {
-  // Create the browser window.
+  // Create the buddy list window (smaller, like classic AIM)
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: 280,
+    height: 500,
+    minWidth: 250,
+    minHeight: 400,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
     },
+    title: 'Buddy List',
   });
 
   // and load the index.html of the app.
@@ -33,6 +37,49 @@ const createWindow = () => {
   if (process.env.NODE_ENV === 'development') {
     mainWindow.webContents.openDevTools();
   }
+};
+
+const createChatWindow = (conversationId: string, conversationName: string) => {
+  // Check if window already exists for this conversation
+  const existingWindow = chatWindows.get(conversationId);
+  if (existingWindow && !existingWindow.isDestroyed()) {
+    existingWindow.focus();
+    return;
+  }
+
+  // Create a new chat window - show immediately for faster perceived performance
+  const chatWindow = new BrowserWindow({
+    width: 500,
+    height: 450,
+    minWidth: 350,
+    minHeight: 300,
+    show: true, // Show immediately
+    backgroundColor: '#f3f4f6', // Match app background to avoid white flash
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+    },
+    title: conversationName || 'Chat',
+  });
+
+  chatWindows.set(conversationId, chatWindow);
+
+  // Load the chat window URL
+  const url = MAIN_WINDOW_VITE_DEV_SERVER_URL
+    ? `${MAIN_WINDOW_VITE_DEV_SERVER_URL}#/chat/${conversationId}`
+    : null;
+
+  if (url) {
+    chatWindow.loadURL(url);
+  } else {
+    chatWindow.loadFile(
+      path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`),
+      { hash: `/chat/${conversationId}` }
+    );
+  }
+
+  chatWindow.on('closed', () => {
+    chatWindows.delete(conversationId);
+  });
 };
 
 const createHangoutWindow = (conversationId: string, participants: unknown[]) => {
@@ -92,6 +139,11 @@ const createHangoutWindow = (conversationId: string, participants: unknown[]) =>
 };
 
 // IPC Handlers
+ipcMain.on('open-chat-window', (_event, { conversationId, conversationName }) => {
+  console.log('main: open-chat-window received', conversationId, conversationName);
+  createChatWindow(conversationId, conversationName);
+});
+
 ipcMain.on('open-hangout-window', (_event, { conversationId, participants }) => {
   createHangoutWindow(conversationId, participants);
 });

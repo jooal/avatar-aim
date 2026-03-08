@@ -1,8 +1,8 @@
 {
   "name": "avatar-aim",
-  "productName": "avatar-aim",
+  "productName": "Avatar AIM",
   "version": "1.0.0",
-  "description": "My Electron application description",
+  "description": "A nostalgic AIM-style chat application with buddy lists and classic vibes",
   "main": ".vite/build/main.js",
   "private": true,
   "scripts": {
@@ -45,6 +45,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.97.0",
     "electron-squirrel-startup": "^1.0.1",
+    "emoji-picker-react": "^4.18.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   }

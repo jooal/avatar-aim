@@ -16,7 +16,7 @@ export interface Profile {
   email: string;
   avatar_url?: string;
   status: 'online' | 'away' | 'offline';
-  status_message?: string;
+  away_message?: string;
   created_at: string;
 }
 

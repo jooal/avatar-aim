@@ -6,6 +6,10 @@ import { contextBridge, ipcRenderer } from 'electron';
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
+  openChatWindow: (conversationId: string, conversationName: string) => {
+    console.log('preload: openChatWindow called', conversationId, conversationName);
+    ipcRenderer.send('open-chat-window', { conversationId, conversationName });
+  },
   openHangoutWindow: (conversationId: string, participants: unknown[]) => {
     ipcRenderer.send('open-hangout-window', { conversationId, participants });
   },
