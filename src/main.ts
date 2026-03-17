@@ -144,6 +144,11 @@ ipcMain.on('open-chat-window', (_event, { conversationId, conversationName }) =>
   createChatWindow(conversationId, conversationName);
 });
 
+ipcMain.handle('is-chat-window-open', (_event, conversationId: string) => {
+  const win = chatWindows.get(conversationId);
+  return !!(win && !win.isDestroyed());
+});
+
 ipcMain.on('open-hangout-window', (_event, { conversationId, participants }) => {
   createHangoutWindow(conversationId, participants);
 });

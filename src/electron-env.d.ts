@@ -5,12 +5,13 @@ declare const MAIN_WINDOW_VITE_NAME: string;
 
 interface ElectronAPI {
   openChatWindow: (conversationId: string, conversationName: string) => void;
+  isChatWindowOpen: (conversationId: string) => Promise<boolean>;
   openHangoutWindow: (conversationId: string, participants: unknown[]) => void;
   closeHangoutWindow: () => void;
   updateAvatarPosition: (x: number, y: number) => void;
   setIgnoreMouseEvents: (ignore: boolean) => void;
-  onHangoutUpdate: (callback: (data: unknown) => void) => void;
-  onAvatarPositionUpdate: (callback: (data: unknown) => void) => void;
+  onHangoutUpdate: (callback: (data: unknown) => void) => () => void;
+  onAvatarPositionUpdate: (callback: (data: unknown) => void) => () => void;
 }
 
 declare global {

@@ -10,34 +10,33 @@ function sanitizeHtml(html: string): string {
     return html;
   }
 
-  const div = document.createElement('div');
-  div.innerHTML = html;
+  const safeTags = ['b', 'strong', 'i', 'em', 'u', 'span', 'font', 'br', 'div', 'p'];
+  const safeAttrs = ['color', 'size', 'face']; // Only allow font-related attributes
 
-  // Remove script tags and event handlers
-  const scripts = div.querySelectorAll('script');
-  scripts.forEach(s => s.remove());
+  // Use DOMParser to avoid executing scripts during parsing
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
 
-  // Walk through all elements and remove dangerous attributes
-  const allElements = div.querySelectorAll('*');
-  allElements.forEach(el => {
-    // Remove event handlers
-    const attrs = Array.from(el.attributes);
-    attrs.forEach(attr => {
-      if (attr.name.startsWith('on') || attr.name === 'href' && attr.value.startsWith('javascript:')) {
-        el.removeAttribute(attr.name);
-      }
-    });
-
-    // Only allow safe tags
-    const safeTags = ['b', 'strong', 'i', 'em', 'u', 'span', 'font', 'br', 'div', 'p'];
+  // Walk through all elements and sanitize
+  const allElements = Array.from(doc.body.querySelectorAll('*'));
+  for (const el of allElements) {
     if (!safeTags.includes(el.tagName.toLowerCase())) {
       // Replace unsafe element with its text content
-      const text = document.createTextNode(el.textContent || '');
+      const text = doc.createTextNode(el.textContent || '');
       el.parentNode?.replaceChild(text, el);
+      continue;
     }
-  });
 
-  return div.innerHTML;
+    // Remove all attributes except safe ones
+    const attrs = Array.from(el.attributes);
+    for (const attr of attrs) {
+      if (!safeAttrs.includes(attr.name)) {
+        el.removeAttribute(attr.name);
+      }
+    }
+  }
+
+  return doc.body.innerHTML;
 }
 
 // Process special characters in away messages
@@ -53,6 +52,9 @@ function processAwayMessageSpecialChars(message: string, buddyName?: string): st
 }
 
 type Status = 'online' | 'away' | 'offline';
+
+// Avatar options for user selection
+const AVATAR_OPTIONS = ['👾', '😎', '🐱', '🤖', '🦊', '👻'];
 
 interface Friend {
   id: string;
@@ -304,24 +306,12 @@ function SignupForm({ onSwitch }: { onSwitch: () => void }) {
     }
 
     if (data.user && !error) {
-      const { error: profileError } = await supabase
-        .from('profiles')
-        .upsert({ id: data.user.id, screen_name: screenName, email: email });
-
-      if (profileError) {
-        setError('Account created but profile setup failed: ' + profileError.message);
-        setLoading(false);
-        return;
-      }
-
       if (!data.session) {
-        const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
-        if (signInError) {
-          setError('Account created! Please check your email to confirm, then sign in.');
-          setLoading(false);
-          onSwitch();
-          return;
-        }
+        // Email confirmation is required - profile will be created by database trigger
+        setError('Account created! Please check your email to confirm, then sign in.');
+        setLoading(false);
+        onSwitch();
+        return;
       }
       setLoading(false);
     }
@@ -599,12 +589,29 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
   const [showAddFriend, setShowAddFriend] = useState(false);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showAwayMessage, setShowAwayMessage] = useState(false);
+  const [showAvatarPicker, setShowAvatarPicker] = useState(false);
   const [loadingFriends, setLoadingFriends] = useState(true);
   const [loadingConversations, setLoadingConversations] = useState(true);
+  const startingDMRef = useRef(false);
   const [buddiesCollapsed, setBuddiesCollapsed] = useState(false);
   const [offlineCollapsed, setOfflineCollapsed] = useState(false);
   const [groupsCollapsed, setGroupsCollapsed] = useState(false);
   const [recentlySignedOn, setRecentlySignedOn] = useState<Set<string>>(new Set());
+  const signOnTimeouts = useRef<Set<NodeJS.Timeout>>(new Set());
+
+  const avatarPickerRef = useRef<HTMLDivElement>(null);
+
+  // Close avatar picker when clicking outside
+  useEffect(() => {
+    if (!showAvatarPicker) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (avatarPickerRef.current && !avatarPickerRef.current.contains(e.target as Node)) {
+        setShowAvatarPicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showAvatarPicker]);
 
   // Track previous friend statuses for sound effects
   const previousStatusesRef = useRef<Map<string, string>>(new Map());
@@ -612,7 +619,13 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
   // Auto-away after 10 minutes of inactivity
   const inactivityTimerRef = useRef<NodeJS.Timeout | null>(null);
   const wasAutoAwayRef = useRef(false);
+  const profileStatusRef = useRef(profile?.status);
   const AUTO_AWAY_TIMEOUT = 10 * 60 * 1000; // 10 minutes
+
+  // Keep status ref in sync
+  useEffect(() => {
+    profileStatusRef.current = profile?.status;
+  }, [profile?.status]);
 
   useEffect(() => {
     const resetInactivityTimer = () => {
@@ -622,7 +635,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
       }
 
       // If user was auto-away and is now active, set them back to online
-      if (wasAutoAwayRef.current && profile?.status === 'away') {
+      if (wasAutoAwayRef.current && profileStatusRef.current === 'away') {
         updateStatus('online');
         wasAutoAwayRef.current = false;
       }
@@ -630,7 +643,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
       // Set new timer
       inactivityTimerRef.current = setTimeout(() => {
         // Only auto-away if user is currently online
-        if (profile?.status === 'online') {
+        if (profileStatusRef.current === 'online') {
           updateStatus('away', 'Auto-away: Inactive');
           wasAutoAwayRef.current = true;
         }
@@ -657,16 +670,19 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
         clearTimeout(inactivityTimerRef.current);
       }
     };
-  }, [profile?.status]);
+  }, []);
 
   useEffect(() => {
     loadFriends();
     loadConversations();
 
-    // Subscribe to realtime updates
+    // Subscribe to realtime updates for friends involving this user
     const friendsChannel = supabase
-      .channel('friends-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'friends' }, () => {
+      .channel(`friends-changes-${user.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'friends', filter: `user_id=eq.${user.id}` }, () => {
+        loadFriends();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'friends', filter: `friend_id=eq.${user.id}` }, () => {
         loadFriends();
       })
       .subscribe();
@@ -683,13 +699,15 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
             playSignOnSound();
             // Add to recently signed on set and remove after 3 seconds
             setRecentlySignedOn(prev => new Set(prev).add(updatedProfile.id));
-            setTimeout(() => {
+            const timeout = setTimeout(() => {
               setRecentlySignedOn(prev => {
                 const newSet = new Set(prev);
                 newSet.delete(updatedProfile.id);
                 return newSet;
               });
+              signOnTimeouts.current.delete(timeout);
             }, 3000);
+            signOnTimeouts.current.add(timeout);
           } else if (previousStatus === 'online' && updatedProfile.status !== 'online') {
             playSignOffSound();
           }
@@ -714,9 +732,63 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
       })
       .subscribe();
 
+    // Subscribe to incoming messages for auto-opening chat windows
+    const messagesChannel = supabase
+      .channel(`incoming-messages-${user.id}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+      }, async (payload) => {
+        const newMessage = payload.new as Message;
+
+        // Ignore own messages
+        if (newMessage.sender_id === user.id) return;
+
+        // Check if user is a participant in this conversation
+        const { data: participation } = await supabase
+          .from('conversation_participants')
+          .select('conversation_id')
+          .eq('conversation_id', newMessage.conversation_id)
+          .eq('user_id', user.id)
+          .single();
+
+        if (!participation) return;
+
+        // Get conversation name for the window title
+        const { data: convo } = await supabase
+          .from('conversations')
+          .select('*')
+          .eq('id', newMessage.conversation_id)
+          .single();
+
+        // Get sender's screen name as fallback window title
+        const { data: senderProfile } = await supabase
+          .from('profiles')
+          .select('screen_name')
+          .eq('id', newMessage.sender_id)
+          .single();
+
+        const windowName = convo?.name || senderProfile?.screen_name || 'Chat';
+
+        // Check if chat window is already open
+        const isOpen = await window.electronAPI?.isChatWindowOpen(newMessage.conversation_id);
+
+        if (isOpen) {
+          // Window is open — sound is handled by ChatWindow component
+        } else {
+          // Window is not open — auto-open it
+          window.electronAPI?.openChatWindow(newMessage.conversation_id, windowName);
+        }
+      })
+      .subscribe();
+
     return () => {
       supabase.removeChannel(friendsChannel);
       supabase.removeChannel(profilesChannel);
+      supabase.removeChannel(messagesChannel);
+      signOnTimeouts.current.forEach(t => clearTimeout(t));
+      signOnTimeouts.current.clear();
     };
   }, [user.id]);
 
@@ -820,6 +892,11 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
   }
 
   async function startDirectMessage(friendId: string) {
+    // Prevent concurrent calls that could create duplicate conversations
+    if (startingDMRef.current) return;
+    startingDMRef.current = true;
+
+    try {
     console.log('startDirectMessage called with friendId:', friendId);
     const isSelfChat = friendId === user.id;
 
@@ -840,30 +917,40 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
       const myConvoIds = myConvos.map(c => c.conversation_id);
 
       if (isSelfChat) {
-        // For self-chat, find a conversation where only the user is a participant
-        for (const convoId of myConvoIds) {
-          const { data: participants } = await supabase
+        // Batch fetch: get all non-group conversations and their participants in 2 queries
+        const { data: nonGroupConvos } = await supabase
+          .from('conversations')
+          .select('id')
+          .in('id', myConvoIds)
+          .eq('is_group', false);
+
+        if (nonGroupConvos && nonGroupConvos.length > 0) {
+          const nonGroupIds = nonGroupConvos.map(c => c.id);
+          const { data: allParticipants } = await supabase
             .from('conversation_participants')
-            .select('user_id')
-            .eq('conversation_id', convoId);
+            .select('conversation_id, user_id')
+            .in('conversation_id', nonGroupIds);
 
-          const { data: convoData } = await supabase
-            .from('conversations')
-            .select('*')
-            .eq('id', convoId)
-            .eq('is_group', false)
-            .single();
+          if (allParticipants) {
+            // Group participants by conversation
+            const participantsByConvo = new Map<string, string[]>();
+            for (const p of allParticipants) {
+              const list = participantsByConvo.get(p.conversation_id) || [];
+              list.push(p.user_id);
+              participantsByConvo.set(p.conversation_id, list);
+            }
 
-          // Check if this is a self-chat (only one unique participant which is the user)
-          if (convoData && participants) {
-            const uniqueParticipants = [...new Set(participants.map(p => p.user_id))];
-            if (uniqueParticipants.length === 1 && uniqueParticipants[0] === user.id) {
-              console.log('Opening existing self-chat:', convoId);
-              window.electronAPI?.openChatWindow(
-                convoId,
-                friendProfile?.screen_name || 'Chat'
-              );
-              return;
+            // Find self-chat: conversation with only the current user
+            for (const [convoId, userIds] of participantsByConvo) {
+              const unique = [...new Set(userIds)];
+              if (unique.length === 1 && unique[0] === user.id) {
+                console.log('Opening existing self-chat:', convoId);
+                window.electronAPI?.openChatWindow(
+                  convoId,
+                  friendProfile?.screen_name || 'Chat'
+                );
+                return;
+              }
             }
           }
         }
@@ -937,6 +1024,26 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
 
       await loadConversations();
     }
+    } finally {
+      startingDMRef.current = false;
+    }
+  }
+
+  async function updateAvatar(emoji: string) {
+    const { error } = await supabase
+      .from('profiles')
+      .update({ avatar_url: emoji })
+      .eq('id', user.id);
+
+    if (error) {
+      console.error('Failed to update avatar:', error);
+      return;
+    }
+
+    if (profile) {
+      setProfile({ ...profile, avatar_url: emoji });
+    }
+    setShowAvatarPicker(false);
   }
 
   async function updateStatus(status: Status, awayMessage?: string) {
@@ -967,13 +1074,6 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
     }
   }
 
-  function handleStatusClick() {
-    // If already away, open the modal to edit the away message
-    if (profile?.status === 'away') {
-      setShowAwayMessage(true);
-    }
-  }
-
   const getStatusColor = (status: Status | undefined) => {
     switch (status) {
       case 'online': return 'bg-green-500';
@@ -987,24 +1087,53 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
         {/* User Profile Header */}
         <div className="p-4 border-b-2 border-gray-400 bg-gray-300">
           <div className="flex items-center gap-3">
-            <div className="relative">
-              <div className="w-12 h-12 rounded bg-yellow-400 border-2 border-gray-500 flex items-center justify-center text-xl">
-                👾
-              </div>
+            <div className="relative" ref={avatarPickerRef}>
+              <button
+                onClick={() => setShowAvatarPicker(!showAvatarPicker)}
+                className="w-12 h-12 rounded bg-green-400 border-2 border-gray-500 flex items-center justify-center text-xl hover:border-gray-700 hover:bg-green-300 transition-colors cursor-pointer"
+                title="Change avatar"
+              >
+                {profile?.avatar_url || '👾'}
+              </button>
               <div className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-2 border-gray-300 ${getStatusColor(profile?.status as Status)}`} />
+              {showAvatarPicker && (
+                <div className="absolute top-14 left-0 z-50 bg-white border-2 border-gray-400 rounded-lg shadow-lg p-2 w-40">
+                  <p className="text-xs text-gray-500 font-semibold mb-1 px-1">Choose Avatar</p>
+                  <div className="grid grid-cols-3 gap-1">
+                    {AVATAR_OPTIONS.map((emoji) => (
+                      <button
+                        key={emoji}
+                        onClick={() => updateAvatar(emoji)}
+                        className={`w-10 h-10 rounded flex items-center justify-center text-xl hover:bg-yellow-100 transition-colors ${
+                          profile?.avatar_url === emoji ? 'bg-yellow-200 border-2 border-yellow-500' : 'bg-gray-50 border border-gray-200'
+                        }`}
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
             <div className="flex-1">
               <h3 className="text-gray-800 font-semibold">{profile?.screen_name}</h3>
               <select
                 value={profile?.status || 'online'}
                 onChange={(e) => handleStatusChange(e.target.value as Status)}
-                onClick={handleStatusClick}
                 className="text-sm bg-transparent text-gray-600 border-none focus:outline-none cursor-pointer"
               >
                 <option value="online" className="bg-white">Online</option>
                 <option value="away" className="bg-white">Away</option>
                 <option value="offline" className="bg-white">Invisible</option>
               </select>
+              {profile?.status === 'away' && (
+                <button
+                  onClick={() => setShowAwayMessage(true)}
+                  className="text-xs text-blue-600 hover:underline"
+                >
+                  Edit away msg
+                </button>
+              )}
             </div>
             <button
               onClick={onLogout}
@@ -1092,10 +1221,10 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                             <FriendItem
                               key={friend.id}
                               friend={friend}
-                              onMessage={() => startDirectMessage(friend.profile!.id)}
+                              onMessage={() => friend.profile && startDirectMessage(friend.profile.id)}
                               getStatusColor={getStatusColor}
                               disabled={false}
-                              recentlySignedOn={recentlySignedOn.has(friend.profile!.id)}
+                              recentlySignedOn={!!friend.profile && recentlySignedOn.has(friend.profile.id)}
                             />
                           ))
                         }
@@ -1176,10 +1305,10 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                             <FriendItem
                               key={friend.id}
                               friend={friend}
-                              onMessage={() => startDirectMessage(friend.profile!.id)}
+                              onMessage={() => friend.profile && startDirectMessage(friend.profile.id)}
                               getStatusColor={getStatusColor}
                               disabled={false}
-                              recentlySignedOn={recentlySignedOn.has(friend.profile!.id)}
+                              recentlySignedOn={!!friend.profile && recentlySignedOn.has(friend.profile.id)}
                             />
                           ))
                         }
@@ -1243,7 +1372,7 @@ function FriendRequestItem({ request, onUpdate }: { request: Friend; onUpdate: (
   return (
     <div className="flex items-center gap-3 p-2 rounded bg-yellow-50 border border-yellow-400">
       <div className="w-10 h-10 rounded bg-yellow-400 border border-gray-400 flex items-center justify-center">
-        👾
+        {request.profile?.avatar_url || '👾'}
       </div>
       <div className="flex-1">
         <p className="text-gray-800 text-sm font-medium">{request.profile?.screen_name}</p>
@@ -1290,7 +1419,7 @@ function FriendItem({ friend, onMessage, getStatusColor, disabled, recentlySigne
         {friend.profile?.screen_name}
       </span>
       {recentlySignedOn && (
-        <span className="text-lg" title="Just signed on!">
+        <span className="text-lg flex-shrink-0" title="Just signed on!">
           🚪
         </span>
       )}
@@ -1325,9 +1454,9 @@ function ConversationItem({ conversation, currentUserId, isActive, onClick, getS
         <div className={`w-8 h-8 rounded border border-gray-400 flex items-center justify-center text-sm ${
           conversation.is_group ? 'bg-purple-300' : 'bg-blue-300'
         }`}>
-          {conversation.is_group ? '👥' : '👾'}
+          {conversation.is_group ? '👥' : (otherParticipants[0]?.avatar_url || '👾')}
         </div>
-        {!conversation.is_group && (
+        {!conversation.is_group && !isSelfChat && (
           <div className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white ${getStatusColor(otherParticipants[0]?.status as Status)}`} />
         )}
       </div>
@@ -1364,9 +1493,10 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
   const [isInHangout, setIsInHangout] = useState(false);
   const [joiningHangout, setJoiningHangout] = useState(false);
   const [awayMessages, setAwayMessages] = useState<AwayMessageEntry[]>([]);
-  const [shownAwayKeys, setShownAwayKeys] = useState<Set<string>>(new Set());
+  const shownInitialAwayRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const typingRemovalTimeouts = useRef<Set<NodeJS.Timeout>>(new Set());
   const channelRef = useRef<RealtimeChannel | null>(null);
 
   const otherParticipants = conversation.participants?.filter(p => p.id !== currentUserId) || [];
@@ -1377,54 +1507,41 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
       ? profile?.screen_name || 'Me'
       : otherParticipants[0]?.screen_name || 'Unknown';
 
-  // Show away messages when participants are away or become away
+  // Show away message immediately when chat window opens if participant is away
   useEffect(() => {
-    // Wait for messages to finish loading
-    if (loadingMessages) return;
-
-    // For self-chat, wait until we have profile data
-    if (isSelfChat && !profile) return;
+    if (loadingMessages || shownInitialAwayRef.current) return;
+    shownInitialAwayRef.current = true;
 
     const newAwayMessages: AwayMessageEntry[] = [];
-    const newShownKeys = new Set(shownAwayKeys);
 
     // Check other participants for away messages
     otherParticipants
       .filter(p => p.status === 'away' && p.away_message)
       .forEach(p => {
-        const awayKey = `${p.id}-${p.away_message}`;
-        if (!shownAwayKeys.has(awayKey)) {
-          newAwayMessages.push({
-            id: `away-${p.id}-${Date.now()}-${Math.random()}`,
-            senderId: p.id,
-            senderName: p.screen_name || 'Unknown',
-            content: p.away_message || '',
-            timestamp: new Date().toISOString()
-          });
-          newShownKeys.add(awayKey);
-        }
-      });
-
-    // For self-chat, also show own away message if away
-    if (isSelfChat && profile?.status === 'away' && profile?.away_message) {
-      const selfAwayKey = `${currentUserId}-${profile.away_message}`;
-      if (!shownAwayKeys.has(selfAwayKey)) {
         newAwayMessages.push({
-          id: `away-${currentUserId}-${Date.now()}-${Math.random()}`,
-          senderId: currentUserId,
-          senderName: profile.screen_name || 'Me',
-          content: profile.away_message,
+          id: `away-init-${p.id}`,
+          senderId: p.id,
+          senderName: p.screen_name || 'Unknown',
+          content: p.away_message || '',
           timestamp: new Date().toISOString()
         });
-        newShownKeys.add(selfAwayKey);
-      }
+      });
+
+    // For self-chat, show own away message if away
+    if (isSelfChat && profile?.status === 'away' && profile?.away_message) {
+      newAwayMessages.push({
+        id: `away-init-${currentUserId}`,
+        senderId: currentUserId,
+        senderName: profile.screen_name || 'Me',
+        content: profile.away_message,
+        timestamp: new Date().toISOString()
+      });
     }
 
     if (newAwayMessages.length > 0) {
       setAwayMessages(prev => [...prev, ...newAwayMessages]);
-      setShownAwayKeys(newShownKeys);
     }
-  }, [loadingMessages, otherParticipants, isSelfChat, profile, currentUserId, shownAwayKeys]);
+  }, [loadingMessages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1519,9 +1636,11 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
           });
 
           // Remove typing indicator after 3 seconds
-          setTimeout(() => {
+          const timeout = setTimeout(() => {
             setTypingUsers(prev => prev.filter(name => name !== payload.screenName));
+            typingRemovalTimeouts.current.delete(timeout);
           }, 3000);
+          typingRemovalTimeouts.current.add(timeout);
         }
       })
       .on('broadcast', { event: 'stop_typing' }, ({ payload }) => {
@@ -1535,6 +1654,11 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
 
     return () => {
       supabase.removeChannel(channel);
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+      typingRemovalTimeouts.current.forEach(t => clearTimeout(t));
+      typingRemovalTimeouts.current.clear();
     };
   }, [conversation.id, currentUserId]);
 
@@ -1581,13 +1705,21 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
     }
 
     setSending(true);
-    await supabase.from('messages').insert({
+    const { error } = await supabase.from('messages').insert({
       conversation_id: conversation.id,
       sender_id: currentUserId,
       content: newMessage.trim()
     });
 
+    if (error) {
+      console.error('Failed to send message:', error);
+      setSending(false);
+      return;
+    }
+
     // After sending, check if any participants are away and trigger their away message
+    // Use a timestamp slightly in the future so it sorts after the sent message
+    const awayTimestamp = new Date(Date.now() + 1000).toISOString();
     const newAwayMessages: AwayMessageEntry[] = [];
 
     // Check other participants for away messages
@@ -1598,7 +1730,7 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
         senderId: p.id,
         senderName: p.screen_name || 'Unknown',
         content: p.away_message || '',
-        timestamp: new Date().toISOString()
+        timestamp: awayTimestamp
       });
     });
 
@@ -1609,15 +1741,15 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
         senderId: currentUserId,
         senderName: profile.screen_name || 'Me',
         content: profile.away_message,
-        timestamp: new Date().toISOString()
+        timestamp: awayTimestamp
       });
     }
 
     if (newAwayMessages.length > 0) {
-      // Small delay to ensure the sent message appears first
+      // Small delay to ensure the sent message arrives via realtime first
       setTimeout(() => {
         setAwayMessages(prev => [...prev, ...newAwayMessages]);
-      }, 100);
+      }, 500);
     }
 
     setNewMessage('');
@@ -1645,7 +1777,7 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
                   backgroundImage: `url("data:image/svg+xml,%3Csvg width='20' height='20' viewBox='0 0 20 20' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M10 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm-4 2c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm8 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm-4 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6 1c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm-12 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm6 5c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm-4 2c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm8 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1z' fill='%233b82f6' fill-opacity='0.4'/%3E%3C/svg%3E")`,
                 }}>
                 <div className="w-16 h-16 rounded-lg bg-yellow-400 border-2 border-yellow-600 flex items-center justify-center text-3xl shadow-lg">
-                  👤
+                  {participant?.avatar_url || '👾'}
                 </div>
               </div>
             ))}
@@ -1731,7 +1863,7 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
                 backgroundImage: `url("data:image/svg+xml,%3Csvg width='20' height='20' viewBox='0 0 20 20' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M10 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm-4 2c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm8 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm-4 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6 1c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm-12 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm6 5c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm-4 2c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm8 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1z' fill='%233b82f6' fill-opacity='0.4'/%3E%3C/svg%3E")`,
               }}>
               <div className="w-16 h-16 rounded-lg bg-green-400 border-2 border-green-600 flex items-center justify-center text-3xl shadow-lg">
-                👾
+                {profile?.avatar_url || '👾'}
               </div>
             </div>
           </div>
@@ -2216,32 +2348,35 @@ function CreateGroupModal({ currentUserId, friends, onClose, onSuccess }: {
               {friends.length === 0 ? (
                 <p className="text-gray-500 text-xs p-1">Add some friends first!</p>
               ) : (
-                friends.map((friend) => (
-                  <label
-                    key={friend.id}
-                    className={`flex items-center gap-2 p-1.5 rounded cursor-pointer transition-colors ${
-                      selectedFriends.includes(friend.profile!.id)
-                        ? 'bg-blue-100 border border-gray-400'
-                        : 'hover:bg-gray-100 border border-transparent'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedFriends.includes(friend.profile!.id)}
-                      onChange={() => toggleFriend(friend.profile!.id)}
-                      className="hidden"
-                    />
-                    <div className="w-6 h-6 rounded bg-blue-300 border border-gray-400 flex items-center justify-center text-xs">
-                      👾
-                    </div>
-                    <span className="text-sm text-gray-800">{friend.profile?.screen_name}</span>
-                    {selectedFriends.includes(friend.profile!.id) && (
-                      <svg className="w-4 h-4 text-blue-600 ml-auto" fill="currentColor" viewBox="0 0 20 20">
-                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                      </svg>
-                    )}
-                  </label>
-                ))
+                friends.filter(f => f.profile).map((friend) => {
+                  const friendId = friend.profile!.id;
+                  return (
+                    <label
+                      key={friend.id}
+                      className={`flex items-center gap-2 p-1.5 rounded cursor-pointer transition-colors ${
+                        selectedFriends.includes(friendId)
+                          ? 'bg-blue-100 border border-gray-400'
+                          : 'hover:bg-gray-100 border border-transparent'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedFriends.includes(friendId)}
+                        onChange={() => toggleFriend(friendId)}
+                        className="hidden"
+                      />
+                      <div className="w-6 h-6 rounded bg-blue-300 border border-gray-400 flex items-center justify-center text-xs">
+                        {friend.profile?.avatar_url || '👾'}
+                      </div>
+                      <span className="text-sm text-gray-800">{friend.profile?.screen_name}</span>
+                      {selectedFriends.includes(friendId) && (
+                        <svg className="w-4 h-4 text-blue-600 ml-auto" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                        </svg>
+                      )}
+                    </label>
+                  );
+                })
               )}
             </div>
           </div>
@@ -2288,6 +2423,7 @@ function AwayMessageModal({ currentMessage, onClose, onSave }: {
   const [showHighlightPicker, setShowHighlightPicker] = useState(false);
   const [activeEmojiCategory, setActiveEmojiCategory] = useState('Smileys');
   const editorRef = useRef<HTMLDivElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const emojiPickerRef = useRef<HTMLDivElement>(null);
   const colorPickerRef = useRef<HTMLDivElement>(null);
   const highlightPickerRef = useRef<HTMLDivElement>(null);
@@ -2302,6 +2438,9 @@ function AwayMessageModal({ currentMessage, onClose, onSave }: {
   // Close pickers when clicking outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
       if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
         setShowEmojiPicker(false);
       }
@@ -2386,6 +2525,9 @@ function AwayMessageModal({ currentMessage, onClose, onSave }: {
 
   const selectSavedMessage = (saved: SavedAwayMessage) => {
     setMessage(saved.message);
+    if (editorRef.current) {
+      editorRef.current.innerHTML = saved.message;
+    }
     setLabel(saved.label);
     setShowDropdown(false);
   };
@@ -2414,7 +2556,7 @@ function AwayMessageModal({ currentMessage, onClose, onSave }: {
           {/* Enter label with dropdown */}
           <div className="flex items-center gap-2 mb-3">
             <label className="text-sm text-gray-800 whitespace-nowrap">Enter label:</label>
-            <div className="relative flex-1">
+            <div className="relative flex-1" ref={dropdownRef}>
               <div
                 className="w-full px-2 py-1 text-sm bg-white border border-gray-500 cursor-pointer flex items-center justify-between"
                 onClick={() => setShowDropdown(!showDropdown)}
