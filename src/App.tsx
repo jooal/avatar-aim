@@ -3,15 +3,25 @@ import { supabase, Profile } from './lib/supabase';
 import { User, RealtimeChannel } from '@supabase/supabase-js';
 import { playSignOnSound, playSignOffSound, playMessageSound } from './utils/sounds';
 
+// Convert plain-text URLs into clickable <a> tags
+function linkifyUrls(html: string): string {
+  // Match URLs that aren't already inside an href attribute or <a> tag
+  return html.replace(
+    /(?<!["'=])\b(https?:\/\/[^\s<>"']+)/g,
+    '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+  );
+}
+
 // Sanitize HTML to prevent XSS while allowing formatting tags
 function sanitizeHtml(html: string): string {
   // If it doesn't contain HTML tags, return as-is (plain text message)
+  // but still linkify URLs
   if (!/<[^>]+>/.test(html)) {
-    return html;
+    return linkifyUrls(html);
   }
 
-  const safeTags = ['b', 'strong', 'i', 'em', 'u', 'span', 'font', 'br', 'div', 'p'];
-  const safeAttrs = ['color', 'size', 'face']; // Only allow font-related attributes
+  const safeTags = ['b', 'strong', 'i', 'em', 'u', 'span', 'font', 'br', 'div', 'p', 'a'];
+  const safeAttrs = ['color', 'size', 'face', 'style', 'href', 'target', 'rel']; // Allow font + style + link attrs
 
   // Use DOMParser to avoid executing scripts during parsing
   const parser = new DOMParser();
@@ -34,9 +44,30 @@ function sanitizeHtml(html: string): string {
         el.removeAttribute(attr.name);
       }
     }
+
+    // Sanitize href to only allow http/https (block javascript: etc)
+    if (el.tagName.toLowerCase() === 'a' && el.hasAttribute('href')) {
+      const href = el.getAttribute('href') || '';
+      if (!/^https?:\/\//i.test(href)) {
+        el.removeAttribute('href');
+      }
+      el.setAttribute('target', '_blank');
+      el.setAttribute('rel', 'noopener noreferrer');
+    }
+
+    // Sanitize style attribute to only allow background-color
+    if (el.hasAttribute('style')) {
+      const bgMatch = el.getAttribute('style')?.match(/background-color\s*:\s*([^;\"']+)/);
+      if (bgMatch) {
+        el.setAttribute('style', `background-color: ${bgMatch[1].trim()}`);
+      } else {
+        el.removeAttribute('style');
+      }
+    }
   }
 
-  return doc.body.innerHTML;
+  // Linkify any plain-text URLs that aren't already in <a> tags
+  return linkifyUrls(doc.body.innerHTML);
 }
 
 // Process special characters in away messages
@@ -98,7 +129,7 @@ function App() {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'login' | 'signup'>('login');
+  const [view, setView] = useState<'login' | 'signup' | 'reset'>('login');
 
   // Check if this is a chat window route
   const hash = window.location.hash;
@@ -164,8 +195,8 @@ function App() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-300 flex items-center justify-center">
-        <div className="text-gray-700 text-xl">Loading...</div>
+      <div className="min-h-screen bg-win-gray flex items-center justify-center">
+        <div className="text-gray-700">Loading...</div>
       </div>
     );
   }
@@ -176,24 +207,34 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-300">
+    <div className="min-h-screen bg-win-gray">
       {!user ? (
         <div className="flex items-center justify-center min-h-screen p-4">
-          <div className="w-full max-w-md">
-            <div className="text-center mb-8">
-              <div className="inline-flex items-center justify-center w-20 h-20 rounded-lg bg-yellow-400 shadow-lg mb-4 border-2 border-gray-400">
-                <span className="text-4xl">👾</span>
+          <div className="w-full max-w-xs">
+            {/* AIM Sign On Window */}
+            <div className="win-raised bg-win-gray">
+              {/* Title bar */}
+              <div className="win-titlebar">
+                <span className="text-sm">Sign On</span>
               </div>
-              <h1 className="text-3xl font-bold text-gray-800">Avatar AIM</h1>
-              <p className="text-gray-600 mt-2">Chat. Play. Connect.</p>
-            </div>
 
-            <div className="bg-gray-200 rounded-lg p-6 border-2 border-gray-400 shadow-lg">
-              {view === 'login' ? (
-                <LoginForm onSwitch={() => setView('signup')} />
-              ) : (
-                <SignupForm onSwitch={() => setView('login')} />
-              )}
+              <div className="p-5 pt-4">
+                {/* AIM Logo Area */}
+                <div className="text-center mb-4">
+                  <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-aim-yellow mb-2">
+                    <span className="text-3xl">😎</span>
+                  </div>
+                  <h1 className="text-lg font-bold text-gray-800">Avatar AIM</h1>
+                </div>
+
+                {view === 'login' ? (
+                  <LoginForm onSwitch={() => setView('signup')} onReset={() => setView('reset')} />
+                ) : view === 'signup' ? (
+                  <SignupForm onSwitch={() => setView('login')} />
+                ) : (
+                  <ResetPasswordForm onSwitch={() => setView('login')} />
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -204,9 +245,10 @@ function App() {
   );
 }
 
-function LoginForm({ onSwitch }: { onSwitch: () => void }) {
+function LoginForm({ onSwitch, onReset }: { onSwitch: () => void; onReset: () => void }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -224,45 +266,135 @@ function LoginForm({ onSwitch }: { onSwitch: () => void }) {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form onSubmit={handleSubmit} className="space-y-3">
       {error && (
-        <div className="p-3 bg-red-100 border border-red-400 rounded text-red-700 text-sm">
+        <div className="p-2 bg-red-100 border border-red-400 text-red-700 text-xs">
           {error}
         </div>
       )}
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+        <label className="block text-xs text-gray-700 mb-1">Email</label>
         <input
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className="w-full px-3 py-2 rounded border-2 border-gray-400 bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:border-gray-500"
+          className="win-input w-full py-1"
           placeholder="Enter your email"
           required
         />
       </div>
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+        <label className="block text-xs text-gray-700 mb-1">Password</label>
+        <div className="relative">
+          <input
+            type={showPassword ? 'text' : 'password'}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="win-input w-full py-1 pr-8"
+            placeholder="Password"
+            required
+          />
+          <button
+            type="button"
+            onClick={() => setShowPassword(!showPassword)}
+            className="absolute right-1 top-1/2 -translate-y-1/2 text-xs text-gray-500 hover:text-gray-800 px-1"
+          >
+            {showPassword ? '🙈' : '👁'}
+          </button>
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <input type="checkbox" id="save-pw" className="accent-aim-yellow" />
+        <label htmlFor="save-pw" className="text-xs text-gray-600">Save password</label>
+      </div>
+      <button
+        type="submit"
+        disabled={loading}
+        className="win-button w-full py-1.5 font-bold disabled:opacity-50"
+      >
+        {loading ? 'Signing On...' : 'Sign On'}
+      </button>
+      <div className="flex justify-between text-xs text-gray-600">
+        <button type="button" onClick={onReset} className="text-[#0000FF] hover:underline">
+          Forgot password?
+        </button>
+        <button type="button" onClick={onSwitch} className="text-[#0000FF] hover:underline">
+          Get a Screen Name
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function ResetPasswordForm({ onSwitch }: { onSwitch: () => void }) {
+  const [email, setEmail] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: 'https://landing-eight-peach.vercel.app/reset-password.html',
+    });
+
+    if (error) {
+      setError(error.message);
+    } else {
+      setSuccess(true);
+    }
+    setLoading(false);
+  };
+
+  if (success) {
+    return (
+      <div className="space-y-3">
+        <div className="p-2 bg-green-100 border border-green-400 text-green-700 text-xs">
+          Check your email for a password reset link.
+        </div>
+        <button
+          type="button"
+          onClick={onSwitch}
+          className="win-button w-full py-1.5 font-bold"
+        >
+          Back to Sign On
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-3">
+      {error && (
+        <div className="p-2 bg-red-100 border border-red-400 text-red-700 text-xs">
+          {error}
+        </div>
+      )}
+      <p className="text-xs text-gray-600">Enter your email and we'll send you a link to reset your password.</p>
+      <div>
+        <label className="block text-xs text-gray-700 mb-1">Email</label>
         <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full px-3 py-2 rounded border-2 border-gray-400 bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:border-gray-500"
-          placeholder="Enter your password"
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="win-input w-full py-1"
+          placeholder="Enter your email"
           required
         />
       </div>
       <button
         type="submit"
         disabled={loading}
-        className="w-full py-2 bg-gray-100 border-2 border-gray-400 text-gray-800 font-bold rounded hover:bg-gray-200 transition-all shadow disabled:opacity-50"
+        className="win-button w-full py-1.5 font-bold disabled:opacity-50"
       >
-        {loading ? 'Signing in...' : 'Sign In'}
+        {loading ? 'Sending...' : 'Reset Password'}
       </button>
-      <p className="text-center text-gray-600">
-        Don't have an account?{' '}
-        <button type="button" onClick={onSwitch} className="text-blue-600 hover:underline">
-          Sign up
+      <p className="text-center text-xs text-gray-600">
+        <button type="button" onClick={onSwitch} className="text-[#0000FF] hover:underline">
+          Back to Sign On
         </button>
       </p>
     </form>
@@ -273,12 +405,34 @@ function SignupForm({ onSwitch }: { onSwitch: () => void }) {
   const [screenName, setScreenName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+
+  const validatePassword = (pw: string) => {
+    if (pw.length < 8) return 'Password must be at least 8 characters';
+    if (!/\d/.test(pw)) return 'Password must contain at least 1 number';
+    if (!/[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]/.test(pw)) return 'Password must contain at least 1 symbol';
+    return null;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (!validateEmail(email)) {
+      setError('Please enter a valid email address');
+      return;
+    }
+
+    const pwError = validatePassword(password);
+    if (pwError) {
+      setError(pwError);
+      return;
+    }
+
     setLoading(true);
 
     const { data: existingProfile } = await supabase
@@ -307,7 +461,6 @@ function SignupForm({ onSwitch }: { onSwitch: () => void }) {
 
     if (data.user && !error) {
       if (!data.session) {
-        // Email confirmation is required - profile will be created by database trigger
         setError('Account created! Please check your email to confirm, then sign in.');
         setLoading(false);
         onSwitch();
@@ -318,19 +471,19 @@ function SignupForm({ onSwitch }: { onSwitch: () => void }) {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form onSubmit={handleSubmit} className="space-y-3">
       {error && (
-        <div className="p-3 bg-red-100 border border-red-400 rounded text-red-700 text-sm">
+        <div className="p-2 bg-red-100 border border-red-400 text-red-700 text-xs">
           {error}
         </div>
       )}
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">Screen Name</label>
+        <label className="block text-xs text-gray-700 mb-1">Screen Name</label>
         <input
           type="text"
           value={screenName}
           onChange={(e) => setScreenName(e.target.value)}
-          className="w-full px-3 py-2 rounded border-2 border-gray-400 bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:border-gray-500"
+          className="win-input w-full py-1"
           placeholder="Choose a screen name"
           required
           minLength={3}
@@ -338,39 +491,48 @@ function SignupForm({ onSwitch }: { onSwitch: () => void }) {
         />
       </div>
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+        <label className="block text-xs text-gray-700 mb-1">Email</label>
         <input
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className="w-full px-3 py-2 rounded border-2 border-gray-400 bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:border-gray-500"
+          className="win-input w-full py-1"
           placeholder="Enter your email"
           required
         />
       </div>
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full px-3 py-2 rounded border-2 border-gray-400 bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:border-gray-500"
-          placeholder="Create a password (min 6 characters)"
-          required
-          minLength={6}
-        />
+        <label className="block text-xs text-gray-700 mb-1">Password</label>
+        <div className="relative">
+          <input
+            type={showPassword ? 'text' : 'password'}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="win-input w-full py-1 pr-8"
+            placeholder="Password"
+            required
+          />
+          <button
+            type="button"
+            onClick={() => setShowPassword(!showPassword)}
+            className="absolute right-1 top-1/2 -translate-y-1/2 text-xs text-gray-500 hover:text-gray-800 px-1"
+          >
+            {showPassword ? '🙈' : '👁'}
+          </button>
+        </div>
+        <p className="text-[10px] text-gray-400 mt-0.5">8+ characters, 1 number, 1 symbol</p>
       </div>
       <button
         type="submit"
         disabled={loading}
-        className="w-full py-2 bg-gray-100 border-2 border-gray-400 text-gray-800 font-bold rounded hover:bg-gray-200 transition-all shadow disabled:opacity-50"
+        className="win-button w-full py-1.5 font-bold disabled:opacity-50"
       >
-        {loading ? 'Creating account...' : 'Create Account'}
+        {loading ? 'Creating...' : 'Get a Screen Name'}
       </button>
-      <p className="text-center text-gray-600">
+      <p className="text-center text-xs text-gray-600">
         Already have an account?{' '}
-        <button type="button" onClick={onSwitch} className="text-blue-600 hover:underline">
-          Sign in
+        <button type="button" onClick={onSwitch} className="text-[#0000FF] hover:underline">
+          Sign On
         </button>
       </p>
     </form>
@@ -504,11 +666,11 @@ function ChatWindow({ conversationId, user, profile: initialProfile }: {
     if (!conversation.is_group) {
       const otherParticipant = conversation.participants?.find(p => p.id !== user.id);
       if (otherParticipant) {
-        document.title = otherParticipant.screen_name || 'Chat';
+        document.title = `Instant Message with ${otherParticipant.screen_name || 'Chat'}`;
       } else {
         // Self-chat: show own name
         const selfParticipant = conversation.participants?.find(p => p.id === user.id);
-        document.title = selfParticipant?.screen_name || freshProfile?.screen_name || 'Chat';
+        document.title = `Instant Message with ${selfParticipant?.screen_name || freshProfile?.screen_name || 'Chat'}`;
       }
     } else {
       // For group chats, show the group name
@@ -550,22 +712,22 @@ function ChatWindow({ conversationId, user, profile: initialProfile }: {
 
   if (loading) {
     return (
-      <div className="h-screen bg-gray-200 flex items-center justify-center">
-        <div className="text-gray-600">Loading chat...</div>
+      <div className="h-screen bg-win-gray flex items-center justify-center">
+        <div className="text-gray-600 text-xs">Loading chat...</div>
       </div>
     );
   }
 
   if (!conversation) {
     return (
-      <div className="h-screen bg-gray-200 flex items-center justify-center">
-        <div className="text-gray-600">Conversation not found</div>
+      <div className="h-screen bg-win-gray flex items-center justify-center">
+        <div className="text-gray-600 text-xs">Conversation not found</div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-100">
+    <div className="h-screen flex flex-col bg-win-gray win-raised">
       <ChatArea
         conversation={conversation}
         messages={messages}
@@ -587,6 +749,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
   const [pendingRequests, setPendingRequests] = useState<Friend[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [showAddFriend, setShowAddFriend] = useState(false);
+  const [showMyAimMenu, setShowMyAimMenu] = useState(false);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [showAwayMessage, setShowAwayMessage] = useState(false);
   const [showAvatarPicker, setShowAvatarPicker] = useState(false);
@@ -600,6 +763,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
   const signOnTimeouts = useRef<Set<NodeJS.Timeout>>(new Set());
 
   const avatarPickerRef = useRef<HTMLDivElement>(null);
+  const myAimMenuRef = useRef<HTMLDivElement>(null);
 
   // Close avatar picker when clicking outside
   useEffect(() => {
@@ -609,9 +773,22 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
         setShowAvatarPicker(false);
       }
     };
+    // Use click (not mousedown) so button onClick fires first
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [showAvatarPicker]);
+
+  // Close My AIM menu when clicking outside
+  useEffect(() => {
+    if (!showMyAimMenu) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (myAimMenuRef.current && !myAimMenuRef.current.contains(e.target as Node)) {
+        setShowMyAimMenu(false);
+      }
+    };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showAvatarPicker]);
+  }, [showMyAimMenu]);
 
   // Track previous friend statuses for sound effects
   const previousStatusesRef = useRef<Map<string, string>>(new Map());
@@ -1083,104 +1260,104 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
   };
 
   return (
-    <div className="h-screen bg-gray-200 flex flex-col">
-        {/* User Profile Header */}
-        <div className="p-4 border-b-2 border-gray-400 bg-gray-300">
-          <div className="flex items-center gap-3">
-            <div className="relative" ref={avatarPickerRef}>
-              <button
-                onClick={() => setShowAvatarPicker(!showAvatarPicker)}
-                className="w-12 h-12 rounded bg-green-400 border-2 border-gray-500 flex items-center justify-center text-xl hover:border-gray-700 hover:bg-green-300 transition-colors cursor-pointer"
-                title="Change avatar"
-              >
-                {profile?.avatar_url || '👾'}
-              </button>
-              <div className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-2 border-gray-300 ${getStatusColor(profile?.status as Status)}`} />
-              {showAvatarPicker && (
-                <div className="absolute top-14 left-0 z-50 bg-white border-2 border-gray-400 rounded-lg shadow-lg p-2 w-40">
-                  <p className="text-xs text-gray-500 font-semibold mb-1 px-1">Choose Avatar</p>
-                  <div className="grid grid-cols-3 gap-1">
-                    {AVATAR_OPTIONS.map((emoji) => (
-                      <button
-                        key={emoji}
-                        onClick={() => updateAvatar(emoji)}
-                        className={`w-10 h-10 rounded flex items-center justify-center text-xl hover:bg-yellow-100 transition-colors ${
-                          profile?.avatar_url === emoji ? 'bg-yellow-200 border-2 border-yellow-500' : 'bg-gray-50 border border-gray-200'
-                        }`}
-                      >
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="flex-1">
-              <h3 className="text-gray-800 font-semibold">{profile?.screen_name}</h3>
-              <select
-                value={profile?.status || 'online'}
-                onChange={(e) => handleStatusChange(e.target.value as Status)}
-                className="text-sm bg-transparent text-gray-600 border-none focus:outline-none cursor-pointer"
-              >
-                <option value="online" className="bg-white">Online</option>
-                <option value="away" className="bg-white">Away</option>
-                <option value="offline" className="bg-white">Invisible</option>
-              </select>
-              {profile?.status === 'away' && (
-                <button
-                  onClick={() => setShowAwayMessage(true)}
-                  className="text-xs text-blue-600 hover:underline"
-                >
-                  Edit away msg
-                </button>
-              )}
-            </div>
-            <button
-              onClick={onLogout}
-              className="p-2 text-gray-500 hover:text-gray-800 transition-colors"
-              title="Sign Out"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-              </svg>
+    <div className="h-screen bg-win-gray flex flex-col win-raised">
+        {/* AIM Title Bar */}
+        <div className="win-titlebar">
+          <span className="text-sm">{profile?.screen_name}'s Buddy List</span>
+        </div>
+
+        {/* Menu Bar */}
+        <div className="bg-win-gray border-b border-win-border-dark px-1 py-0.5 flex gap-3 text-sm">
+          <div className="relative" ref={myAimMenuRef}>
+            <button className="hover:bg-win-gray-light px-1" onClick={() => setShowMyAimMenu(!showMyAimMenu)}>
+              <span className="underline">M</span>y AIM
             </button>
+            {showMyAimMenu && (
+              <div className="absolute top-full left-0 bg-win-gray win-raised z-50 shadow-lg min-w-[140px]">
+                <button
+                  onClick={() => { onLogout(); setShowMyAimMenu(false); }}
+                  className="w-full text-left px-3 py-1 text-sm hover:bg-[#316AC5] hover:text-white"
+                >
+                  Sign Off
+                </button>
+              </div>
+            )}
+          </div>
+          <button className="hover:bg-win-gray-light px-1" onClick={() => setShowAddFriend(true)}>
+            <span className="underline">P</span>eople
+          </button>
+        </div>
+
+        {/* Profile Bar */}
+        <div className="bg-win-gray px-2 py-1.5 border-b border-win-border-dark flex items-center gap-2">
+          <div className="relative" ref={avatarPickerRef}>
+            <button
+              onClick={() => setShowAvatarPicker(!showAvatarPicker)}
+              className="w-8 h-8 rounded bg-aim-yellow flex items-center justify-center text-sm hover:brightness-110 cursor-pointer"
+              title="Change avatar"
+              style={{ border: '1px solid #808080' }}
+            >
+              {profile?.avatar_url || '😎'}
+            </button>
+            <div className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border border-white ${getStatusColor(profile?.status as Status)}`} />
+            {showAvatarPicker && (
+              <div className="absolute top-10 left-0 z-50 bg-win-gray win-raised p-2 w-36">
+                <p className="text-xs text-gray-600 font-bold mb-1">Choose Avatar</p>
+                <div className="grid grid-cols-3 gap-1">
+                  {AVATAR_OPTIONS.map((emoji) => (
+                    <button
+                      key={emoji}
+                      onClick={() => updateAvatar(emoji)}
+                      className={`w-9 h-9 flex items-center justify-center text-lg hover:bg-aim-yellow/30 ${
+                        profile?.avatar_url === emoji ? 'bg-aim-yellow/40 win-sunken' : 'win-raised'
+                      }`}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-bold text-gray-800 truncate">{profile?.screen_name}</div>
+            <select
+              value={profile?.status || 'online'}
+              onChange={(e) => handleStatusChange(e.target.value as Status)}
+              className="text-xs bg-transparent text-gray-600 border-none focus:outline-none cursor-pointer p-0"
+            >
+              <option value="online">Online</option>
+              <option value="away">Away</option>
+              <option value="offline">Invisible</option>
+            </select>
           </div>
         </div>
 
-        {/* Content */}
+        {/* Action Buttons Bar */}
+        <div className="bg-win-gray px-1 py-1 border-b border-win-border-dark flex gap-1">
+          <button onClick={() => setShowAddFriend(true)} className="win-button text-sm flex-1">Add Buddy</button>
+          <button onClick={() => setShowCreateGroup(true)} className="win-button text-sm flex-1">Chat</button>
+        </div>
+
+        {/* Buddy List Content */}
         <div className="flex-1 overflow-y-auto bg-white">
-          <div className="p-3 space-y-2">
-            {/* Action Buttons */}
-            <div className="flex gap-2">
-              <button
-                onClick={() => setShowAddFriend(true)}
-                className="flex-1 py-2 px-3 bg-gray-100 border-2 border-gray-400 text-gray-700 rounded hover:bg-gray-200 transition-colors text-sm font-medium"
-              >
-                + Add Buddy
-              </button>
-              <button
-                onClick={() => setShowCreateGroup(true)}
-                className="flex-1 py-2 px-3 bg-gray-100 border-2 border-gray-400 text-gray-700 rounded hover:bg-gray-200 transition-colors text-sm font-medium"
-              >
-                + Group Chat
-              </button>
-            </div>
+          <div className="py-1">
             {pendingRequests.length > 0 && (
-              <div className="text-xs text-red-500 font-medium px-1">
+              <div className="text-xs text-red-600 font-bold px-3 py-1 bg-red-50">
                 {pendingRequests.length} pending request{pendingRequests.length > 1 ? 's' : ''}
               </div>
             )}
 
               {loadingFriends ? (
                 <div className="flex items-center justify-center py-8">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-500"></div>
+                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-gray-500"></div>
                 </div>
               ) : (
                 <>
                   {/* Pending Requests */}
                   {pendingRequests.length > 0 && (
-                    <div className="mt-4">
-                      <h4 className="text-xs uppercase text-gray-500 font-semibold mb-2 px-2">Friend Requests</h4>
+                    <div className="mb-1">
+                      <div className="text-xs font-bold text-gray-600 px-3 py-0.5 bg-win-gray-light border-b border-gray-300">Friend Requests</div>
                       {pendingRequests.map((request) => (
                         <FriendRequestItem key={request.id} request={request} onUpdate={loadFriends} />
                       ))}
@@ -1188,18 +1365,12 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                   )}
 
                   {/* Buddies List - Online */}
-                  <div className="mt-4">
+                  <div>
                     <button
                       onClick={() => setBuddiesCollapsed(!buddiesCollapsed)}
-                      className="flex items-center gap-1 text-xs uppercase text-gray-500 font-semibold mb-2 px-2 hover:text-gray-700 w-full text-left"
+                      className="flex items-center gap-1 text-sm font-bold text-gray-700 px-2 py-0.5 hover:bg-gray-100 w-full text-left bg-win-gray-light border-b border-gray-200"
                     >
-                      <svg
-                        className={`w-3 h-3 transition-transform ${buddiesCollapsed ? '' : 'rotate-90'}`}
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                      >
-                        <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                      </svg>
+                      <span className="text-xs">{buddiesCollapsed ? '▶' : '▼'}</span>
                       Buddies ({friends.filter(f => f.profile?.status === 'online' || f.profile?.status === 'away').length + (profile?.status === 'online' || profile?.status === 'away' ? 1 : 0)}/{friends.length + 1})
                     </button>
                     {!buddiesCollapsed && (
@@ -1208,9 +1379,10 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                         {profile && (profile.status === 'online' || profile.status === 'away') && (
                           <button
                             onClick={() => startDirectMessage(user.id)}
-                            className="w-full py-1 px-4 hover:bg-gray-100 transition-colors text-left"
+                            className="w-full py-0.5 px-5 hover:bg-[#316AC5] hover:text-white transition-colors text-left flex items-center gap-1.5"
                           >
-                            <span className={`text-sm ${profile.status === 'away' ? 'text-gray-400' : 'text-gray-800'}`}>
+                            <span className="text-xs">{profile.status === 'away' ? '📝' : '👤'}</span>
+                            <span className={`text-sm ${profile.status === 'away' ? 'italic text-gray-500' : 'text-gray-800'}`}>
                               {profile.screen_name}
                             </span>
                           </button>
@@ -1229,30 +1401,24 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                           ))
                         }
                         {friends.length === 0 && !(profile?.status === 'online' || profile?.status === 'away') && (
-                          <p className="text-gray-500 text-sm px-2">No buddies yet. Add some!</p>
+                          <p className="text-gray-400 text-xs px-5 py-1">No buddies online</p>
                         )}
                       </>
                     )}
                   </div>
 
                   {/* Groups List */}
-                  <div className="mt-4">
+                  <div>
                     <button
                       onClick={() => setGroupsCollapsed(!groupsCollapsed)}
-                      className="flex items-center gap-1 text-xs uppercase text-gray-500 font-semibold mb-2 px-2 hover:text-gray-700 w-full text-left"
+                      className="flex items-center gap-1 text-sm font-bold text-gray-700 px-2 py-0.5 hover:bg-gray-100 w-full text-left bg-win-gray-light border-b border-gray-200"
                     >
-                      <svg
-                        className={`w-3 h-3 transition-transform ${groupsCollapsed ? '' : 'rotate-90'}`}
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                      >
-                        <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                      </svg>
+                      <span className="text-xs">{groupsCollapsed ? '▶' : '▼'}</span>
                       Groups ({conversations.filter(c => c.is_group).length})
                     </button>
                     {!groupsCollapsed && (
                       conversations.filter(c => c.is_group).length === 0 ? (
-                        <p className="text-gray-400 text-sm px-4">No groups yet</p>
+                        <p className="text-gray-400 text-xs px-5 py-1">No groups yet</p>
                       ) : (
                         conversations
                           .filter(c => c.is_group)
@@ -1260,8 +1426,9 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                             <button
                               key={convo.id}
                               onClick={() => window.electronAPI?.openChatWindow(convo.id, convo.name || 'Group Chat')}
-                              className="w-full py-1 px-4 hover:bg-gray-100 transition-colors text-left"
+                              className="w-full py-0.5 px-5 hover:bg-[#316AC5] hover:text-white transition-colors text-left flex items-center gap-1.5"
                             >
+                              <span className="text-xs">👥</span>
                               <span className="text-sm text-gray-800">
                                 {convo.name || 'Group Chat'}
                               </span>
@@ -1272,18 +1439,12 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                   </div>
 
                   {/* Buddies List - Offline */}
-                  <div className="mt-4">
+                  <div>
                     <button
                       onClick={() => setOfflineCollapsed(!offlineCollapsed)}
-                      className="flex items-center gap-1 text-xs uppercase text-gray-500 font-semibold mb-2 px-2 hover:text-gray-700 w-full text-left"
+                      className="flex items-center gap-1 text-sm font-bold text-gray-700 px-2 py-0.5 hover:bg-gray-100 w-full text-left bg-win-gray-light border-b border-gray-200"
                     >
-                      <svg
-                        className={`w-3 h-3 transition-transform ${offlineCollapsed ? '' : 'rotate-90'}`}
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                      >
-                        <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                      </svg>
+                      <span className="text-xs">{offlineCollapsed ? '▶' : '▼'}</span>
                       Offline ({friends.filter(f => f.profile?.status === 'offline' || !f.profile?.status).length + (profile?.status === 'offline' || !profile?.status ? 1 : 0)}/{friends.length + 1})
                     </button>
                     {!offlineCollapsed && (
@@ -1292,8 +1453,9 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                         {profile && (profile.status === 'offline' || !profile.status) && (
                           <button
                             onClick={() => startDirectMessage(user.id)}
-                            className="w-full py-1 px-4 hover:bg-gray-100 transition-colors text-left"
+                            className="w-full py-0.5 px-5 hover:bg-[#316AC5] hover:text-white transition-colors text-left flex items-center gap-1.5"
                           >
+                            <span className="text-xs opacity-40">👤</span>
                             <span className="text-sm text-gray-400">
                               {profile.screen_name}
                             </span>
@@ -1318,6 +1480,25 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                 </>
               )}
             </div>
+        </div>
+
+        {/* Bottom: I am Away button */}
+        <div className="bg-win-gray border-t border-win-border-dark p-1">
+          {profile?.status === 'away' ? (
+            <button
+              onClick={() => updateStatus('online')}
+              className="win-button w-full text-sm py-1 font-bold text-red-700"
+            >
+              I'm Back (Cancel Away)
+            </button>
+          ) : (
+            <button
+              onClick={() => setShowAwayMessage(true)}
+              className="win-button w-full text-sm py-1"
+            >
+              Set Away Message
+            </button>
+          )}
         </div>
 
       {/* Modals */}
@@ -1370,32 +1551,14 @@ function FriendRequestItem({ request, onUpdate }: { request: Friend; onUpdate: (
   };
 
   return (
-    <div className="flex items-center gap-3 p-2 rounded bg-yellow-50 border border-yellow-400">
-      <div className="w-10 h-10 rounded bg-yellow-400 border border-gray-400 flex items-center justify-center">
-        {request.profile?.avatar_url || '👾'}
+    <div className="flex items-center gap-2 px-3 py-1 bg-aim-yellow/10 border-b border-gray-200">
+      <span className="text-xs">❓</span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-bold text-gray-800 truncate">{request.profile?.screen_name}</p>
+        <p className="text-xs text-gray-500">Wants to be buddies</p>
       </div>
-      <div className="flex-1">
-        <p className="text-gray-800 text-sm font-medium">{request.profile?.screen_name}</p>
-        <p className="text-gray-500 text-xs">Wants to be friends</p>
-      </div>
-      <div className="flex gap-1">
-        <button
-          onClick={handleAccept}
-          className="p-1.5 bg-green-100 text-green-600 rounded border border-green-400 hover:bg-green-200"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-        </button>
-        <button
-          onClick={handleDecline}
-          className="p-1.5 bg-red-100 text-red-600 rounded border border-red-400 hover:bg-red-200"
-        >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
+      <button onClick={handleAccept} className="win-button text-xs px-2 py-0.5 text-green-700">Accept</button>
+      <button onClick={handleDecline} className="win-button text-xs px-2 py-0.5 text-red-700">Deny</button>
     </div>
   );
 }
@@ -1409,19 +1572,21 @@ function FriendItem({ friend, onMessage, getStatusColor, disabled, recentlySigne
 }) {
   const isAway = friend.profile?.status === 'away';
 
+  const isOffline = friend.profile?.status === 'offline' || !friend.profile?.status;
+  const statusIcon = isOffline ? '👤' : isAway ? '📝' : '👤';
+
   return (
     <button
       onClick={onMessage}
       disabled={disabled}
-      className="w-full py-1 px-4 hover:bg-gray-100 transition-colors text-left disabled:opacity-50 disabled:cursor-wait flex items-center justify-between"
+      className={`w-full py-0.5 px-5 hover:bg-[#316AC5] hover:text-white transition-colors text-left disabled:opacity-50 disabled:cursor-wait flex items-center gap-1.5 ${recentlySignedOn ? 'bg-aim-yellow/20' : ''}`}
     >
-      <span className={`text-sm ${isAway ? 'text-gray-400' : 'text-gray-800'}`}>
+      <span className={`text-xs ${isOffline ? 'opacity-40' : ''}`}>{statusIcon}</span>
+      <span className={`text-sm ${isOffline ? 'text-gray-400' : isAway ? 'italic text-gray-500' : 'text-gray-800'}`}>
         {friend.profile?.screen_name}
       </span>
       {recentlySignedOn && (
-        <span className="text-lg flex-shrink-0" title="Just signed on!">
-          🚪
-        </span>
+        <span className="text-xs text-green-600 ml-auto">*</span>
       )}
     </button>
   );
@@ -1498,6 +1663,7 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const typingRemovalTimeouts = useRef<Set<NodeJS.Timeout>>(new Set());
   const channelRef = useRef<RealtimeChannel | null>(null);
+  const awayRepliedRef = useRef<Set<string>>(new Set());
 
   const otherParticipants = conversation.participants?.filter(p => p.id !== currentUserId) || [];
   const isSelfChat = otherParticipants.length === 0 && !conversation.is_group;
@@ -1527,6 +1693,17 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
         });
       });
 
+    // Show own away message if current user is away (e.g. window auto-opened from incoming message)
+    if (!isSelfChat && profile?.status === 'away' && profile?.away_message) {
+      newAwayMessages.push({
+        id: `away-init-self-${currentUserId}`,
+        senderId: currentUserId,
+        senderName: profile.screen_name || 'Me',
+        content: profile.away_message,
+        timestamp: new Date().toISOString()
+      });
+    }
+
     // For self-chat, show own away message if away
     if (isSelfChat && profile?.status === 'away' && profile?.away_message) {
       newAwayMessages.push({
@@ -1545,7 +1722,7 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, awayMessages]);
+  }, [messages, awayMessages, typingUsers]);
 
   // Load and subscribe to hangout participants
   useEffect(() => {
@@ -1648,6 +1825,20 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
           setTypingUsers(prev => prev.filter(name => name !== payload.screenName));
         }
       })
+      .on('broadcast', { event: 'away_reply' }, ({ payload }) => {
+        const awayEntry: AwayMessageEntry = {
+          id: payload.id,
+          senderId: payload.senderId,
+          senderName: payload.senderName,
+          content: payload.content,
+          timestamp: payload.timestamp,
+        };
+        setAwayMessages(prev => {
+          // Avoid duplicates
+          if (prev.some(a => a.id === awayEntry.id)) return prev;
+          return [...prev, awayEntry];
+        });
+      })
       .subscribe();
 
     channelRef.current = channel;
@@ -1717,14 +1908,15 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
       return;
     }
 
-    // After sending, check if any participants are away and trigger their away message
+    // After sending, check if any participants are away and broadcast their away message
     // Use a timestamp slightly in the future so it sorts after the sent message
     const awayTimestamp = new Date(Date.now() + 1000).toISOString();
     const newAwayMessages: AwayMessageEntry[] = [];
 
-    // Check other participants for away messages
-    const awayParticipants = otherParticipants.filter(p => p.status === 'away' && p.away_message);
+    // Check other participants for away messages (only once per buddy per session)
+    const awayParticipants = otherParticipants.filter(p => p.status === 'away' && p.away_message && !awayRepliedRef.current.has(p.id));
     awayParticipants.forEach(p => {
+      awayRepliedRef.current.add(p.id);
       newAwayMessages.push({
         id: `away-${p.id}-${Date.now()}`,
         senderId: p.id,
@@ -1734,8 +1926,9 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
       });
     });
 
-    // For self-chat, also show own away message if away
-    if (isSelfChat && profile?.status === 'away' && profile?.away_message) {
+    // For self-chat, also show own away message if away (once per session)
+    if (isSelfChat && profile?.status === 'away' && profile?.away_message && !awayRepliedRef.current.has(currentUserId)) {
+      awayRepliedRef.current.add(currentUserId);
       newAwayMessages.push({
         id: `away-${currentUserId}-${Date.now()}`,
         senderId: currentUserId,
@@ -1746,9 +1939,23 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
     }
 
     if (newAwayMessages.length > 0) {
-      // Small delay to ensure the sent message arrives via realtime first
       setTimeout(() => {
-        setAwayMessages(prev => [...prev, ...newAwayMessages]);
+        if (isSelfChat) {
+          // Self-chat: add directly to local state (broadcast won't echo back to sender)
+          setAwayMessages(prev => {
+            const newEntries = newAwayMessages.filter(msg => !prev.some(a => a.id === msg.id));
+            return [...prev, ...newEntries];
+          });
+        } else {
+          // Broadcast away messages so both sides see them
+          newAwayMessages.forEach(msg => {
+            channelRef.current?.send({
+              type: 'broadcast',
+              event: 'away_reply',
+              payload: msg,
+            });
+          });
+        }
       }, 500);
     }
 
@@ -1764,85 +1971,72 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
   };
 
   return (
-    <>
-      {/* Main content area - 2 row grid for perfect 50/50 split */}
-      <div className="flex-1 grid grid-rows-2 overflow-hidden">
-        {/* TOP ROW: Top avatar + Messages */}
-        <div className="flex min-h-0">
-          {/* Top avatar banner */}
-          <div className="w-24 flex-shrink-0 border-r-2 border-gray-400 bg-gray-400 pt-1 pl-1 pr-1 pb-0.5">
-            {(isSelfChat ? [profile] : otherParticipants).filter(Boolean).slice(0, 1).map((participant, idx) => (
-              <div key={participant?.id || idx} className="h-full flex items-center justify-center p-2 bg-blue-600"
-                style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg width='20' height='20' viewBox='0 0 20 20' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M10 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm-4 2c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm8 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm-4 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6 1c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm-12 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm6 5c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm-4 2c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm8 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1z' fill='%233b82f6' fill-opacity='0.4'/%3E%3C/svg%3E")`,
-                }}>
-                <div className="w-16 h-16 rounded-lg bg-yellow-400 border-2 border-yellow-600 flex items-center justify-center text-3xl shadow-lg">
-                  {participant?.avatar_url || '👾'}
-                </div>
-              </div>
-            ))}
-          </div>
-          {/* Messages area */}
-          <div className="flex-1 min-w-0 overflow-y-auto p-4 bg-white">
+    <div className="flex-1 flex flex-col bg-win-gray overflow-hidden">
+      {/* Messages area */}
+      <div className="flex-1 min-h-0 overflow-y-auto bg-white win-sunken m-1 p-2" style={{ fontSize: 'medium' }}>
         {loadingMessages ? (
           <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-500 mx-auto mb-3"></div>
-              <p className="text-gray-500 text-sm">Loading messages...</p>
-            </div>
+            <p className="text-gray-500 text-xs">Loading messages...</p>
           </div>
         ) : messages.length === 0 && awayMessages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
-            <p className="text-gray-500">No messages yet. Say hello!</p>
+            <p className="text-gray-400 text-xs">No messages yet. Say hello!</p>
           </div>
         ) : (
-          <div className="space-y-1">
-            {/* Combine and sort messages with away messages by timestamp */}
+          <div className="space-y-0.5">
             {(() => {
-              // Create unified list of all messages
               const allItems: Array<{type: 'message' | 'away', data: Message | AwayMessageEntry, timestamp: string}> = [
                 ...messages.map(m => ({ type: 'message' as const, data: m, timestamp: m.created_at })),
                 ...awayMessages.map(a => ({ type: 'away' as const, data: a, timestamp: a.timestamp }))
               ];
-              // Sort by timestamp
               allItems.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
               return allItems.map((item) => {
                 if (item.type === 'away') {
                   const awayMsg = item.data as AwayMessageEntry;
-                  // Process special characters: %n = viewer's name, %d = date, %t = time
                   const processedContent = processAwayMessageSpecialChars(
                     awayMsg.content,
                     profile?.screen_name
                   );
                   return (
-                    <div key={awayMsg.id} className="flex justify-start">
-                      <div className="leading-relaxed max-w-[80%] text-left">
-                        <span className="font-bold text-blue-600">
-                          {awayMsg.senderName} (away message):
-                        </span>{' '}
-                        <span
-                          className="text-gray-800"
-                          dangerouslySetInnerHTML={{ __html: sanitizeHtml(processedContent) }}
-                        />
-                      </div>
+                    <div key={awayMsg.id}>
+                      <span className="font-bold text-[#0000FF]">
+                        {awayMsg.senderName} (away message):
+                      </span>{' '}
+                      <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(processedContent) }} />
                     </div>
                   );
                 } else {
                   const message = item.data as Message;
                   const isOwn = message.sender_id === currentUserId;
                   const screenName = message.sender?.screen_name || (isOwn ? profile?.screen_name : 'Unknown');
+
+                  if (isSelfChat) {
+                    // Self-chat: show message twice — blue (as sender) then red (as echo/reply)
+                    return (
+                      <React.Fragment key={message.id}>
+                        <div>
+                          <span className="font-bold text-[#0000FF]">
+                            {screenName}:
+                          </span>{' '}
+                          <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(message.content) }} />
+                        </div>
+                        <div>
+                          <span className="font-bold text-[#FF0000]">
+                            {screenName}:
+                          </span>{' '}
+                          <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(message.content) }} />
+                        </div>
+                      </React.Fragment>
+                    );
+                  }
+
                   return (
-                    <div key={message.id} className="flex justify-start">
-                      <div className="leading-relaxed max-w-[80%] text-left">
-                        <span className={`font-bold ${isOwn ? 'text-red-600' : 'text-blue-600'}`}>
-                          {screenName}:
-                        </span>{' '}
-                        <span
-                          className="text-gray-800"
-                          dangerouslySetInnerHTML={{ __html: sanitizeHtml(message.content) }}
-                        />
-                      </div>
+                    <div key={message.id}>
+                      <span className={`font-bold ${isOwn ? 'text-[#FF0000]' : 'text-[#0000FF]'}`}>
+                        {screenName}:
+                      </span>{' '}
+                      <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(message.content) }} />
                     </div>
                   );
                 }
@@ -1850,54 +2044,34 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
             })()}
           </div>
         )}
-          <div ref={messagesEndRef} />
-          </div>
-        </div>
-
-        {/* BOTTOM ROW: Bottom avatar + Input area */}
-        <div className="flex min-h-0">
-          {/* Bottom avatar banner */}
-          <div className="w-24 flex-shrink-0 border-r-2 border-gray-400 bg-gray-400 pt-0.5 pl-1 pr-1 pb-1">
-            <div className="h-full flex items-center justify-center p-2 bg-blue-600"
-              style={{
-                backgroundImage: `url("data:image/svg+xml,%3Csvg width='20' height='20' viewBox='0 0 20 20' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M10 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm-4 2c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm8 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm-4 4c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6 1c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm-12 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm6 5c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm-4 2c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1zm8 0c.55 0 1-.45 1-1s-.45-1-1-1-1 .45-1 1 .45 1 1 1z' fill='%233b82f6' fill-opacity='0.4'/%3E%3C/svg%3E")`,
-              }}>
-              <div className="w-16 h-16 rounded-lg bg-green-400 border-2 border-green-600 flex items-center justify-center text-3xl shadow-lg">
-                {profile?.avatar_url || '👾'}
-              </div>
+        {/* Typing Indicator */}
+        {typingUsers.length > 0 && (
+          <div className="flex items-center gap-1 text-gray-500 py-0.5">
+            <div className="flex gap-0.5">
+              <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
+              <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
+              <span className="w-1 h-1 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
             </div>
+            <span className="text-xs italic">
+              {typingUsers.length === 1
+                ? `${typingUsers[0]} is typing...`
+                : `${typingUsers.join(', ')} are typing...`}
+            </span>
           </div>
-          {/* Input area */}
-          <div className="flex-1 min-w-0 flex flex-col">
-            {/* Typing Indicator */}
-            {typingUsers.length > 0 && (
-              <div className="px-4 py-2 border-b border-gray-300 bg-gray-100">
-                <div className="flex items-center gap-2 text-gray-500 text-sm">
-                  <div className="flex gap-1">
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></span>
-                  </div>
-                  <span>
-                    {typingUsers.length === 1
-                      ? `${typingUsers[0]} is typing...`
-                      : `${typingUsers.join(', ')} are typing...`}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Message Input - fills remaining space */}
-            <MessageInput
-              value={newMessage}
-              onChange={handleInputChange}
-              onSend={handleSend}
-              sending={sending}
-            />
-          </div>
-        </div>
+        )}
+        <div ref={messagesEndRef} />
       </div>
-    </>
+
+      {/* Input area with formatting toolbar */}
+      <div className="flex flex-col min-h-[120px]">
+        <MessageInput
+          value={newMessage}
+          onChange={handleInputChange}
+          onSend={handleSend}
+          sending={sending}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -1925,6 +2099,9 @@ function MessageInput({ value, onChange, onSend, sending }: {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [showHighlightPicker, setShowHighlightPicker] = useState(false);
+  const [showLinkInput, setShowLinkInput] = useState(false);
+  const [linkUrl, setLinkUrl] = useState('');
+  const savedSelectionRef = useRef<Range | null>(null);
   const [activeCategory, setActiveCategory] = useState('Smileys');
   const editorRef = useRef<HTMLDivElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -1985,14 +2162,14 @@ function MessageInput({ value, onChange, onSend, sending }: {
   };
 
   return (
-    <div className="h-full flex flex-col bg-gray-200">
+    <div className="h-full flex flex-col bg-win-gray">
       {/* Formatting Toolbar */}
-      <div className="flex items-center gap-1 px-4 py-2 border-b border-gray-300 bg-gray-300">
+      <div className="flex items-center gap-0.5 px-1 py-0.5 border-b border-win-border-dark bg-win-gray">
         {/* Bold */}
         <button
           type="button"
           onClick={() => applyFormat('bold')}
-          className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded font-bold transition-colors border border-gray-400"
+          className="win-button w-6 h-6 flex items-center justify-center text-xs font-bold p-0"
           title="Bold (Ctrl+B)"
         >
           B
@@ -2001,7 +2178,7 @@ function MessageInput({ value, onChange, onSend, sending }: {
         <button
           type="button"
           onClick={() => applyFormat('italic')}
-          className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded italic transition-colors border border-gray-400"
+          className="win-button w-6 h-6 flex items-center justify-center text-xs italic p-0"
           title="Italic (Ctrl+I)"
         >
           I
@@ -2010,54 +2187,63 @@ function MessageInput({ value, onChange, onSend, sending }: {
         <button
           type="button"
           onClick={() => applyFormat('underline')}
-          className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded underline transition-colors border border-gray-400"
+          className="win-button w-6 h-6 flex items-center justify-center text-xs underline p-0"
           title="Underline (Ctrl+U)"
         >
           U
         </button>
 
-        <div className="w-px h-5 bg-gray-400 mx-1" />
+        <div className="w-px h-4 bg-win-border-dark mx-0.5" />
 
-        {/* Font Size Smaller */}
+        {/* Font Size Smaller: small (2) */}
         <button
           type="button"
           onClick={() => applyFormat('fontSize', '2')}
-          className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded text-xs transition-colors border border-gray-400"
-          title="Smaller text"
+          className="win-button w-6 h-6 flex items-center justify-center p-0"
+          title="Small text"
         >
-          A
+          <span className="text-xs">A</span>
         </button>
-        {/* Font Size Larger */}
+        {/* Font Size Normal: default (3) */}
+        <button
+          type="button"
+          onClick={() => applyFormat('fontSize', '3')}
+          className="win-button w-6 h-6 flex items-center justify-center p-0"
+          title="Normal text"
+        >
+          <span className="text-xs">A</span>
+        </button>
+        {/* Font Size Larger: large (5) */}
         <button
           type="button"
           onClick={() => applyFormat('fontSize', '5')}
-          className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded text-lg transition-colors border border-gray-400"
-          title="Larger text"
+          className="win-button w-6 h-6 flex items-center justify-center p-0"
+          title="Large text"
         >
-          A
+          <span className="text-sm font-bold">A</span>
         </button>
 
-        <div className="w-px h-5 bg-gray-400 mx-1" />
+        <div className="w-px h-4 bg-win-border-dark mx-0.5" />
 
         {/* Text Color */}
         <div className="relative color-picker-container">
           <button
             type="button"
             onClick={() => { setShowColorPicker(!showColorPicker); setShowHighlightPicker(false); }}
-            className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded transition-colors border border-gray-400"
+            className="win-button w-6 h-6 flex items-center justify-center p-0 relative"
             title="Text color"
           >
-            <span className="text-sm">A</span>
-            <span className="absolute bottom-1 left-1/2 -translate-x-1/2 w-4 h-1 bg-gradient-to-r from-red-500 via-yellow-500 to-blue-500 rounded-full" />
+            <span className="text-xs">A</span>
+            <span className="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-3 h-0.5 bg-gradient-to-r from-red-500 via-yellow-500 to-blue-500" />
           </button>
           {showColorPicker && (
-            <div className="absolute bottom-10 left-0 bg-white border-2 border-gray-400 rounded p-2 flex gap-1 flex-wrap w-28 z-50 shadow-lg">
+            <div className="absolute bottom-8 left-0 bg-win-gray win-raised p-1.5 flex gap-0.5 flex-wrap w-24 z-50">
               {TEXT_COLORS.map((color) => (
                 <button
                   key={color}
                   type="button"
                   onClick={() => { applyFormat('foreColor', color); setShowColorPicker(false); }}
-                  className="w-5 h-5 rounded border border-gray-400 hover:scale-110 transition-transform"
+                  className="w-4 h-4 border border-gray-500 hover:scale-110 transition-transform"
                   style={{ backgroundColor: color }}
                 />
               ))}
@@ -2070,70 +2256,160 @@ function MessageInput({ value, onChange, onSend, sending }: {
           <button
             type="button"
             onClick={() => { setShowHighlightPicker(!showHighlightPicker); setShowColorPicker(false); }}
-            className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-gray-900 hover:bg-gray-200 rounded transition-colors border border-gray-400"
+            className="win-button w-6 h-6 flex items-center justify-center p-0"
             title="Highlight color"
           >
-            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
-              <path fillRule="evenodd" d="M4 2a2 2 0 00-2 2v11a3 3 0 106 0V4a2 2 0 00-2-2H4zm1 14a1 1 0 100-2 1 1 0 000 2zm5-1.757l4.9-4.9a2 2 0 000-2.828L13.485 5.1a2 2 0 00-2.828 0L10 5.757v8.486zM16 18H9.071l6-6H16a2 2 0 012 2v2a2 2 0 01-2 2z" clipRule="evenodd" />
-            </svg>
+            <span className="text-xs font-bold px-0.5" style={{ backgroundColor: '#FFFF00' }}>ab</span>
           </button>
           {showHighlightPicker && (
-            <div className="absolute bottom-10 left-0 bg-white border-2 border-gray-400 rounded p-2 flex gap-1 z-50 shadow-lg">
+            <div className="absolute bottom-8 left-0 bg-win-gray win-raised p-1.5 flex gap-0.5 z-50">
               {HIGHLIGHT_COLORS.map((color) => (
                 <button
                   key={color}
                   type="button"
                   onClick={() => { applyFormat('hiliteColor', color); setShowHighlightPicker(false); }}
-                  className="w-5 h-5 rounded border border-gray-400 hover:scale-110 transition-transform"
+                  className="w-4 h-4 border border-gray-500 hover:scale-110 transition-transform"
                   style={{ backgroundColor: color === 'transparent' ? 'white' : color }}
                 >
-                  {color === 'transparent' && <span className="text-xs text-gray-400">✕</span>}
+                  {color === 'transparent' && <span className="text-[8px] text-gray-400">✕</span>}
                 </button>
               ))}
             </div>
           )}
         </div>
 
-        <div className="w-px h-5 bg-gray-400 mx-1" />
+        {/* Insert Link */}
+        <div className="relative">
+          <button
+            type="button"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              // Save selection before opening the input
+              const selection = window.getSelection();
+              if (selection && selection.rangeCount > 0) {
+                savedSelectionRef.current = selection.getRangeAt(0).cloneRange();
+              }
+            }}
+            onClick={() => { setShowLinkInput(!showLinkInput); setLinkUrl(''); }}
+            className="win-button w-6 h-6 flex items-center justify-center p-0"
+            title="Insert link"
+          >
+            <span className="text-xs underline text-[#0000FF]">🔗</span>
+          </button>
+          {showLinkInput && (
+            <div className="fixed left-2 bg-win-gray win-raised p-2 z-[9999] shadow-lg" style={{ bottom: '140px', width: '260px' }}>
+              <div className="text-xs font-bold mb-1">Insert Link</div>
+              <input
+                type="text"
+                value={linkUrl}
+                onChange={(e) => setLinkUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (!linkUrl || !/^https?:\/\//i.test(linkUrl)) return;
+                    if (editorRef.current) {
+                      editorRef.current.focus();
+                      if (savedSelectionRef.current) {
+                        const sel = window.getSelection();
+                        sel?.removeAllRanges();
+                        sel?.addRange(savedSelectionRef.current);
+                      }
+                      const sel = window.getSelection();
+                      if (sel && sel.toString().length > 0) {
+                        document.execCommand('createLink', false, linkUrl);
+                      } else {
+                        document.execCommand('insertHTML', false, `<a href="${linkUrl}" target="_blank" rel="noopener noreferrer">${linkUrl}</a>`);
+                      }
+                      onChange(editorRef.current.innerHTML);
+                    }
+                    setShowLinkInput(false);
+                    setLinkUrl('');
+                  } else if (e.key === 'Escape') {
+                    setShowLinkInput(false);
+                  }
+                }}
+                className="win-input w-full py-0.5 text-xs mb-1"
+                placeholder="https://..."
+                autoFocus
+              />
+              <div className="flex gap-1 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setShowLinkInput(false)}
+                  className="win-button text-xs px-2 py-0.5"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!linkUrl || !/^https?:\/\//i.test(linkUrl)) return;
+                    if (editorRef.current) {
+                      editorRef.current.focus();
+                      if (savedSelectionRef.current) {
+                        const sel = window.getSelection();
+                        sel?.removeAllRanges();
+                        sel?.addRange(savedSelectionRef.current);
+                      }
+                      const sel = window.getSelection();
+                      if (sel && sel.toString().length > 0) {
+                        document.execCommand('createLink', false, linkUrl);
+                      } else {
+                        document.execCommand('insertHTML', false, `<a href="${linkUrl}" target="_blank" rel="noopener noreferrer">${linkUrl}</a>`);
+                      }
+                      onChange(editorRef.current.innerHTML);
+                    }
+                    setShowLinkInput(false);
+                    setLinkUrl('');
+                  }}
+                  className="win-button text-xs px-2 py-0.5 font-bold"
+                >
+                  Insert
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="w-px h-4 bg-win-border-dark mx-0.5" />
 
         {/* Emoji Picker */}
         <div className="relative" ref={pickerRef}>
           <button
             type="button"
             onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-            className="w-8 h-8 flex items-center justify-center text-gray-600 hover:text-yellow-600 transition-colors rounded hover:bg-gray-200 border border-gray-400"
+            className="win-button w-6 h-6 flex items-center justify-center p-0"
+            title="Emoticons"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
+            <span className="text-sm">😊</span>
           </button>
 
           {showEmojiPicker && (
-            <div className="absolute bottom-full left-0 mb-1 bg-white border-2 border-gray-400 rounded shadow-lg w-56 max-h-48 overflow-hidden z-50">
-              <div className="flex overflow-x-auto border-b border-gray-300 p-1 gap-0.5 bg-gray-100 scrollbar-thin">
+            <div className="fixed left-2 bg-win-gray win-raised w-72 overflow-hidden z-[9999] shadow-lg" style={{ bottom: '140px' }}>
+              <div className="flex overflow-x-auto border-b border-win-border-dark p-1 gap-1 bg-win-gray-light">
                 {Object.keys(EMOJI_CATEGORIES).map((category) => (
                   <button
                     key={category}
                     type="button"
                     onClick={() => setActiveCategory(category)}
-                    className={`px-1.5 py-0.5 text-[10px] font-medium rounded whitespace-nowrap transition-colors ${
+                    className={`px-1.5 py-0.5 text-xs whitespace-nowrap ${
                       activeCategory === category
-                        ? 'bg-blue-100 text-blue-600 border border-gray-400'
-                        : 'text-gray-600 hover:text-gray-800 hover:bg-gray-200'
+                        ? 'win-sunken bg-white font-bold'
+                        : 'win-button'
                     }`}
                   >
                     {category}
                   </button>
                 ))}
               </div>
-              <div className="p-1.5 h-32 overflow-y-auto overflow-x-auto">
-                <div className="grid grid-cols-6 gap-0.5">
+              <div className="p-1.5 h-48 overflow-y-auto">
+                <div className="grid grid-cols-6 gap-1">
                   {EMOJI_CATEGORIES[activeCategory as keyof typeof EMOJI_CATEGORIES].map((emoji, i) => (
                     <button
                       key={i}
                       type="button"
-                      onClick={() => insertEmoji(emoji)}
-                      className="w-6 h-6 flex items-center justify-center text-base hover:bg-gray-100 rounded transition-colors"
+                      onClick={() => { insertEmoji(emoji); setShowEmojiPicker(false); }}
+                      className="w-9 h-9 flex items-center justify-center text-2xl hover:bg-[#316AC5] rounded"
                     >
                       {emoji}
                     </button>
@@ -2146,21 +2422,21 @@ function MessageInput({ value, onChange, onSend, sending }: {
       </div>
 
       {/* Message Input Area */}
-      <form onSubmit={handleSubmit} className="flex-1 flex flex-col p-3">
-        <div className="flex-1 flex gap-3 items-stretch">
-          <div
-            ref={editorRef}
-            contentEditable
-            onInput={handleInput}
-            onKeyDown={handleKeyDown}
-            className="flex-1 px-3 py-2 rounded border-2 border-gray-400 bg-white text-gray-800 focus:outline-none focus:border-gray-500 overflow-y-auto"
-            style={{ wordBreak: 'break-word' }}
-            data-placeholder="Type a message..."
-          />
+      <form onSubmit={handleSubmit} className="flex-1 flex flex-col p-1">
+        <div
+          ref={editorRef}
+          contentEditable
+          onInput={handleInput}
+          onKeyDown={handleKeyDown}
+          className="flex-1 bg-white win-sunken px-2 py-1 overflow-y-auto"
+          style={{ wordBreak: 'break-word', fontFamily: 'Arial, sans-serif', fontSize: 'medium' }}
+          data-placeholder="Type a message..."
+        />
+        <div className="flex justify-end gap-1 mt-1">
           <button
             type="submit"
             disabled={sending}
-            className="px-6 py-2 bg-gray-100 border-2 border-gray-400 text-gray-800 font-bold rounded hover:bg-gray-200 transition-all disabled:opacity-50 self-end"
+            className="win-button px-4 py-0.5 font-bold text-xs disabled:opacity-50"
           >
             {sending ? '...' : 'Send'}
           </button>
@@ -2240,39 +2516,32 @@ function AddFriendModal({ currentUserId, onClose, onSuccess }: {
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-      <div className="bg-gray-200 rounded-lg p-6 w-full max-w-md border-2 border-gray-400 shadow-xl">
-        <h2 className="text-xl font-bold text-gray-800 mb-4">Add Friend</h2>
-        <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="bg-win-gray win-raised w-full max-w-xs">
+        <div className="win-titlebar justify-between">
+          <span className="text-xs">Add Buddy</span>
+          <button onClick={onClose} className="text-white hover:bg-red-500 px-1.5 text-xs leading-none">x</button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-3 space-y-3">
           {error && (
-            <div className="p-3 bg-red-100 border border-red-400 rounded text-red-700 text-sm">
+            <div className="p-2 bg-red-100 border border-red-400 text-red-700 text-xs">
               {error}
             </div>
           )}
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Screen Name</label>
+            <label className="block text-xs text-gray-700 mb-1">Screen Name</label>
             <input
               type="text"
               value={screenName}
               onChange={(e) => setScreenName(e.target.value)}
-              className="w-full px-3 py-2 rounded border-2 border-gray-400 bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:border-gray-500"
-              placeholder="Enter friend's screen name"
+              className="win-input w-full py-1"
+              placeholder="Enter buddy's screen name"
               required
             />
           </div>
-          <div className="flex gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 py-2 bg-gray-100 border-2 border-gray-400 text-gray-700 rounded hover:bg-gray-200 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={loading}
-              className="flex-1 py-2 bg-gray-100 border-2 border-gray-400 text-gray-800 font-bold rounded hover:bg-gray-200 transition-all disabled:opacity-50"
-            >
-              {loading ? 'Sending...' : 'Send Request'}
+          <div className="flex gap-2 justify-end">
+            <button type="button" onClick={onClose} className="win-button px-3 py-0.5 text-xs">Cancel</button>
+            <button type="submit" disabled={loading} className="win-button px-3 py-0.5 text-xs font-bold disabled:opacity-50">
+              {loading ? 'Sending...' : 'Add'}
             </button>
           </div>
         </form>
@@ -2328,35 +2597,38 @@ function CreateGroupModal({ currentUserId, friends, onClose, onSuccess }: {
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
-      <div className="bg-gray-200 rounded-lg p-4 w-full max-w-sm border-2 border-gray-400 shadow-xl">
-        <h2 className="text-base font-bold text-gray-800 mb-3">Create Group Chat</h2>
-        <form onSubmit={handleSubmit} className="space-y-3">
+      <div className="bg-win-gray win-raised w-full max-w-xs">
+        <div className="win-titlebar justify-between">
+          <span className="text-xs">Create Chat Room</span>
+          <button onClick={onClose} className="text-white hover:bg-red-500 px-1.5 text-xs leading-none">x</button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-3 space-y-3">
           <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Group Name</label>
+            <label className="block text-xs text-gray-700 mb-1">Group Name</label>
             <input
               type="text"
               value={groupName}
               onChange={(e) => setGroupName(e.target.value)}
-              className="w-full px-2 py-1.5 text-sm rounded border-2 border-gray-400 bg-white text-gray-900 placeholder-gray-500 focus:outline-none focus:border-gray-500"
+              className="win-input w-full py-1"
               placeholder="Enter group name"
               required
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-700 mb-1">Select Friends</label>
-            <div className="space-y-1 max-h-40 overflow-y-auto bg-white border-2 border-gray-400 rounded p-1.5">
+            <label className="block text-xs text-gray-700 mb-1">Select Buddies</label>
+            <div className="space-y-0.5 max-h-36 overflow-y-auto bg-white win-sunken p-1">
               {friends.length === 0 ? (
-                <p className="text-gray-500 text-xs p-1">Add some friends first!</p>
+                <p className="text-gray-500 text-xs p-1">Add some buddies first!</p>
               ) : (
                 friends.filter(f => f.profile).map((friend) => {
                   const friendId = friend.profile!.id;
                   return (
                     <label
                       key={friend.id}
-                      className={`flex items-center gap-2 p-1.5 rounded cursor-pointer transition-colors ${
+                      className={`flex items-center gap-2 px-1 py-0.5 cursor-pointer ${
                         selectedFriends.includes(friendId)
-                          ? 'bg-blue-100 border border-gray-400'
-                          : 'hover:bg-gray-100 border border-transparent'
+                          ? 'bg-[#316AC5] text-white'
+                          : 'hover:bg-gray-100'
                       }`}
                     >
                       <input
@@ -2365,33 +2637,19 @@ function CreateGroupModal({ currentUserId, friends, onClose, onSuccess }: {
                         onChange={() => toggleFriend(friendId)}
                         className="hidden"
                       />
-                      <div className="w-6 h-6 rounded bg-blue-300 border border-gray-400 flex items-center justify-center text-xs">
-                        {friend.profile?.avatar_url || '👾'}
-                      </div>
-                      <span className="text-sm text-gray-800">{friend.profile?.screen_name}</span>
-                      {selectedFriends.includes(friendId) && (
-                        <svg className="w-4 h-4 text-blue-600 ml-auto" fill="currentColor" viewBox="0 0 20 20">
-                          <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                        </svg>
-                      )}
+                      <span className="text-xs">{friend.profile?.screen_name}</span>
                     </label>
                   );
                 })
               )}
             </div>
           </div>
-          <div className="flex gap-2 pt-1">
-            <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 py-1.5 text-sm bg-gray-100 border-2 border-gray-400 text-gray-700 rounded hover:bg-gray-200 transition-colors"
-            >
-              Cancel
-            </button>
+          <div className="flex gap-2 justify-end">
+            <button type="button" onClick={onClose} className="win-button px-3 py-0.5 text-xs">Cancel</button>
             <button
               type="submit"
               disabled={loading || selectedFriends.length === 0 || !groupName.trim()}
-              className="flex-1 py-1.5 text-sm bg-gray-100 border-2 border-gray-400 text-gray-800 font-medium rounded hover:bg-gray-200 transition-all disabled:opacity-50"
+              className="win-button px-3 py-0.5 text-xs font-bold disabled:opacity-50"
             >
               {loading ? 'Creating...' : 'Create'}
             </button>
@@ -2612,7 +2870,7 @@ function AwayMessageModal({ currentMessage, onClose, onSave }: {
             <div className="w-px h-5 bg-gray-400 mx-0.5" />
 
             {/* Smaller text */}
-            <button type="button" onClick={() => applyFormat('fontSize', '2')} className="w-6 h-6 border border-gray-400 bg-white text-[10px] hover:bg-gray-100" title="Smaller text">A</button>
+            <button type="button" onClick={() => applyFormat('fontSize', '2')} className="w-6 h-6 border border-gray-400 bg-white text-xs hover:bg-gray-100" title="Smaller text">A</button>
             {/* Larger text */}
             <button type="button" onClick={() => applyFormat('fontSize', '5')} className="w-6 h-6 border border-gray-400 bg-white text-sm hover:bg-gray-100" title="Larger text">A</button>
 
@@ -2694,7 +2952,7 @@ function AwayMessageModal({ currentMessage, onClose, onSave }: {
                         key={category}
                         type="button"
                         onClick={() => setActiveEmojiCategory(category)}
-                        className={`px-1.5 py-0.5 text-[10px] font-medium rounded whitespace-nowrap ${
+                        className={`px-1.5 py-0.5 text-xs font-medium rounded whitespace-nowrap ${
                           activeEmojiCategory === category
                             ? 'bg-blue-100 text-blue-600 border border-gray-400'
                             : 'text-gray-600 hover:bg-gray-200'

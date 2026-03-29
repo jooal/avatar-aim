@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, shell } from 'electron';
 import path from 'node:path';
 import started from 'electron-squirrel-startup';
 
@@ -22,6 +22,7 @@ const createWindow = () => {
       preload: path.join(__dirname, 'preload.js'),
     },
     title: 'Buddy List',
+    backgroundColor: '#ECE9D8',
   });
 
   // and load the index.html of the app.
@@ -54,11 +55,11 @@ const createChatWindow = (conversationId: string, conversationName: string) => {
     minWidth: 350,
     minHeight: 300,
     show: true, // Show immediately
-    backgroundColor: '#f3f4f6', // Match app background to avoid white flash
+    backgroundColor: '#ECE9D8', // Windows XP gray
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
     },
-    title: conversationName || 'Chat',
+    title: `Instant Message with ${conversationName || 'Chat'}`,
   });
 
   chatWindows.set(conversationId, chatWindow);
@@ -177,6 +178,25 @@ ipcMain.on('set-ignore-mouse-events', (_event, ignore: boolean) => {
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
+// Open external links in the system browser
+app.on('web-contents-created', (_event, contents) => {
+  contents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+
+  contents.on('will-navigate', (event, url) => {
+    // Allow hash navigation for internal routing
+    if (url.includes('#/chat/') || url.includes('#/hangout')) return;
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+});
+
 app.on('ready', createWindow);
 
 // Quit when all windows are closed, except on macOS. There, it's common
