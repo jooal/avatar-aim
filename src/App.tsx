@@ -162,11 +162,32 @@ function App() {
   }, []);
 
   async function loadProfile(userId: string) {
-    const { data } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', userId)
-      .single();
+    // Retry a few times in case the DB trigger hasn't created the profile yet
+    let data = null;
+    for (let i = 0; i < 5; i++) {
+      const result = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single();
+      data = result.data;
+      if (data) break;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    // If profile still doesn't exist, create it from auth metadata
+    if (!data) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const screenName = user.user_metadata?.screen_name || user.email?.split('@')[0] || 'User';
+        const { data: newProfile } = await supabase
+          .from('profiles')
+          .upsert({ id: userId, screen_name: screenName, email: user.email || '' })
+          .select()
+          .single();
+        data = newProfile;
+      }
+    }
 
     setProfile(data);
     setLoading(false);
@@ -450,7 +471,10 @@ function SignupForm({ onSwitch }: { onSwitch: () => void }) {
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: { screen_name: screenName } },
+      options: {
+        data: { screen_name: screenName },
+        emailRedirectTo: 'https://landing-eight-peach.vercel.app/confirmed.html',
+      },
     });
 
     if (error) {
@@ -751,6 +775,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
   const [showAddFriend, setShowAddFriend] = useState(false);
   const [showMyAimMenu, setShowMyAimMenu] = useState(false);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
   const [showAwayMessage, setShowAwayMessage] = useState(false);
   const [showAvatarPicker, setShowAvatarPicker] = useState(false);
   const [loadingFriends, setLoadingFriends] = useState(true);
@@ -817,14 +842,15 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
         wasAutoAwayRef.current = false;
       }
 
-      // Set new timer
-      inactivityTimerRef.current = setTimeout(() => {
-        // Only auto-away if user is currently online
-        if (profileStatusRef.current === 'online') {
-          updateStatus('away', 'Auto-away: Inactive');
-          wasAutoAwayRef.current = true;
-        }
-      }, AUTO_AWAY_TIMEOUT);
+      // Set new timer — only if user is online (don't override manual away)
+      if (profileStatusRef.current === 'online') {
+        inactivityTimerRef.current = setTimeout(() => {
+          if (profileStatusRef.current === 'online') {
+            updateStatus('away', 'Auto-away: Inactive');
+            wasAutoAwayRef.current = true;
+          }
+        }, AUTO_AWAY_TIMEOUT);
+      }
     };
 
     // Activity events to track
@@ -1393,7 +1419,13 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                             <FriendItem
                               key={friend.id}
                               friend={friend}
-                              onMessage={() => friend.profile && startDirectMessage(friend.profile.id)}
+                              onMessage={() => {
+                              if (friend.profile?.status === 'away') {
+                                setViewingProfile(friend.profile);
+                              } else if (friend.profile) {
+                                startDirectMessage(friend.profile.id);
+                              }
+                            }}
                               getStatusColor={getStatusColor}
                               disabled={false}
                               recentlySignedOn={!!friend.profile && recentlySignedOn.has(friend.profile.id)}
@@ -1467,7 +1499,13 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                             <FriendItem
                               key={friend.id}
                               friend={friend}
-                              onMessage={() => friend.profile && startDirectMessage(friend.profile.id)}
+                              onMessage={() => {
+                              if (friend.profile?.status === 'away') {
+                                setViewingProfile(friend.profile);
+                              } else if (friend.profile) {
+                                startDirectMessage(friend.profile.id);
+                              }
+                            }}
                               getStatusColor={getStatusColor}
                               disabled={false}
                               recentlySignedOn={!!friend.profile && recentlySignedOn.has(friend.profile.id)}
@@ -1528,6 +1566,50 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
             setShowAwayMessage(false);
           }}
         />
+      )}
+
+      {viewingProfile && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+          <div className="bg-win-gray win-raised w-full max-w-xs">
+            <div className="win-titlebar justify-between">
+              <span className="text-xs">Buddy Info</span>
+              <button onClick={() => setViewingProfile(null)} className="text-white hover:bg-red-500 px-1.5 text-xs leading-none">x</button>
+            </div>
+            <div className="p-4 text-center">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded bg-aim-yellow text-3xl mb-2" style={{ border: '2px solid #808080' }}>
+                {viewingProfile.avatar_url || '😎'}
+              </div>
+              <div className="text-sm font-bold text-gray-800 mb-1">{viewingProfile.screen_name}</div>
+              <div className="flex items-center justify-center gap-1 mb-3">
+                <span className="w-2 h-2 rounded-full bg-yellow-500"></span>
+                <span className="text-xs text-gray-500">Away</span>
+              </div>
+              {viewingProfile.away_message && (
+                <div className="win-sunken bg-white p-2 text-xs text-left mb-3">
+                  <div className="text-gray-500 text-xs mb-1 font-bold">Away Message:</div>
+                  <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(viewingProfile.away_message) }} />
+                </div>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    startDirectMessage(viewingProfile.id);
+                    setViewingProfile(null);
+                  }}
+                  className="win-button flex-1 text-xs py-1"
+                >
+                  Send Message
+                </button>
+                <button
+                  onClick={() => setViewingProfile(null)}
+                  className="win-button flex-1 text-xs py-1"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1661,9 +1743,8 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
   const shownInitialAwayRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const typingRemovalTimeouts = useRef<Set<NodeJS.Timeout>>(new Set());
+  const typingRemovalTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const channelRef = useRef<RealtimeChannel | null>(null);
-  const awayRepliedRef = useRef<Set<string>>(new Set());
 
   const otherParticipants = conversation.participants?.filter(p => p.id !== currentUserId) || [];
   const isSelfChat = otherParticipants.length === 0 && !conversation.is_group;
@@ -1812,12 +1893,15 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
             return prev;
           });
 
-          // Remove typing indicator after 3 seconds
+          // Clear existing timeout for this user, then set a new one
+          const existingTimeout = typingRemovalTimeouts.current.get(payload.screenName);
+          if (existingTimeout) clearTimeout(existingTimeout);
+
           const timeout = setTimeout(() => {
             setTypingUsers(prev => prev.filter(name => name !== payload.screenName));
-            typingRemovalTimeouts.current.delete(timeout);
+            typingRemovalTimeouts.current.delete(payload.screenName);
           }, 3000);
-          typingRemovalTimeouts.current.add(timeout);
+          typingRemovalTimeouts.current.set(payload.screenName, timeout);
         }
       })
       .on('broadcast', { event: 'stop_typing' }, ({ payload }) => {
@@ -1913,10 +1997,9 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
     const awayTimestamp = new Date(Date.now() + 1000).toISOString();
     const newAwayMessages: AwayMessageEntry[] = [];
 
-    // Check other participants for away messages (only once per buddy per session)
-    const awayParticipants = otherParticipants.filter(p => p.status === 'away' && p.away_message && !awayRepliedRef.current.has(p.id));
+    // Check other participants for away messages (every time)
+    const awayParticipants = otherParticipants.filter(p => p.status === 'away' && p.away_message);
     awayParticipants.forEach(p => {
-      awayRepliedRef.current.add(p.id);
       newAwayMessages.push({
         id: `away-${p.id}-${Date.now()}`,
         senderId: p.id,
@@ -1926,9 +2009,8 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
       });
     });
 
-    // For self-chat, also show own away message if away (once per session)
-    if (isSelfChat && profile?.status === 'away' && profile?.away_message && !awayRepliedRef.current.has(currentUserId)) {
-      awayRepliedRef.current.add(currentUserId);
+    // For self-chat, also show own away message if away
+    if (isSelfChat && profile?.status === 'away' && profile?.away_message) {
       newAwayMessages.push({
         id: `away-${currentUserId}-${Date.now()}`,
         senderId: currentUserId,
@@ -1991,14 +2073,39 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
               ];
               allItems.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-              return allItems.map((item) => {
+              let lastDateStr = '';
+              const elements: React.ReactNode[] = [];
+
+              allItems.forEach((item) => {
+                // Insert date separator when the day changes
+                const itemDate = new Date(item.timestamp);
+                const dateStr = itemDate.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+                if (dateStr !== lastDateStr) {
+                  lastDateStr = dateStr;
+                  const today = new Date();
+                  const yesterday = new Date(today);
+                  yesterday.setDate(yesterday.getDate() - 1);
+                  let displayDate = dateStr;
+                  if (itemDate.toDateString() === today.toDateString()) {
+                    displayDate = 'Today';
+                  } else if (itemDate.toDateString() === yesterday.toDateString()) {
+                    displayDate = 'Yesterday';
+                  }
+                  elements.push(
+                    <div key={`date-${dateStr}`} className="flex items-center gap-2 my-2">
+                      <div className="flex-1 border-t border-gray-300" />
+                      <span className="text-xs text-gray-400 px-1">{displayDate}</span>
+                      <div className="flex-1 border-t border-gray-300" />
+                    </div>
+                  );
+                }
                 if (item.type === 'away') {
                   const awayMsg = item.data as AwayMessageEntry;
                   const processedContent = processAwayMessageSpecialChars(
                     awayMsg.content,
                     profile?.screen_name
                   );
-                  return (
+                  elements.push(
                     <div key={awayMsg.id}>
                       <span className="font-bold text-[#0000FF]">
                         {awayMsg.senderName} (away message):
@@ -2012,8 +2119,7 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
                   const screenName = message.sender?.screen_name || (isOwn ? profile?.screen_name : 'Unknown');
 
                   if (isSelfChat) {
-                    // Self-chat: show message twice — blue (as sender) then red (as echo/reply)
-                    return (
+                    elements.push(
                       <React.Fragment key={message.id}>
                         <div>
                           <span className="font-bold text-[#0000FF]">
@@ -2029,18 +2135,19 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
                         </div>
                       </React.Fragment>
                     );
+                  } else {
+                    elements.push(
+                      <div key={message.id}>
+                        <span className={`font-bold ${isOwn ? 'text-[#FF0000]' : 'text-[#0000FF]'}`}>
+                          {screenName}:
+                        </span>{' '}
+                        <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(message.content) }} />
+                      </div>
+                    );
                   }
-
-                  return (
-                    <div key={message.id}>
-                      <span className={`font-bold ${isOwn ? 'text-[#FF0000]' : 'text-[#0000FF]'}`}>
-                        {screenName}:
-                      </span>{' '}
-                      <span dangerouslySetInnerHTML={{ __html: sanitizeHtml(message.content) }} />
-                    </div>
-                  );
                 }
               });
+              return elements;
             })()}
           </div>
         )}
