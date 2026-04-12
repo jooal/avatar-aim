@@ -1770,6 +1770,9 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
   const [isInHangout, setIsInHangout] = useState(false);
   const [joiningHangout, setJoiningHangout] = useState(false);
   const [awayMessages, setAwayMessages] = useState<AwayMessageEntry[]>([]);
+  const [justCameOnline, setJustCameOnline] = useState(false);
+  const prevStatusRef = useRef<Status | null | undefined>(null);
+  const awayMessageCountRef = useRef<Map<string, number>>(new Map());
   const shownInitialAwayRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -1833,7 +1836,27 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, awayMessages, typingUsers]);
+  }, [messages, awayMessages, typingUsers, justCameOnline]);
+
+  // Track status transitions for the other participant (DM only)
+  const otherStatus = !conversation.is_group && otherParticipants[0]?.status;
+  useEffect(() => {
+    if (conversation.is_group || isSelfChat) return;
+    const prev = prevStatusRef.current;
+    const curr = otherStatus as Status | undefined;
+    // Skip first render (prev is null only on initial)
+    if (prev !== null && prev === 'offline' && curr === 'online') {
+      setJustCameOnline(true);
+      prevStatusRef.current = curr;
+      const t = setTimeout(() => setJustCameOnline(false), 10000);
+      return () => clearTimeout(t);
+    }
+    // Reset away message counter when buddy is no longer away
+    if (prev === 'away' && curr !== 'away' && otherParticipants[0]) {
+      awayMessageCountRef.current.delete(otherParticipants[0].id);
+    }
+    prevStatusRef.current = curr;
+  }, [otherStatus, conversation.is_group, isSelfChat]);
 
   // Load and subscribe to hangout participants
   useEffect(() => {
@@ -2027,39 +2050,47 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
     const awayTimestamp = new Date(Date.now() + 1000).toISOString();
     const newAwayMessages: AwayMessageEntry[] = [];
 
-    // Check other participants for away messages (every time)
+    // Check other participants for away messages (every 5 messages per buddy)
     const awayParticipants = otherParticipants.filter(p => p.status === 'away' && p.away_message);
     awayParticipants.forEach(p => {
-      newAwayMessages.push({
-        id: `away-${p.id}-${Date.now()}`,
-        senderId: p.id,
-        senderName: p.screen_name || 'Unknown',
-        content: p.away_message || '',
-        timestamp: awayTimestamp
-      });
+      const count = (awayMessageCountRef.current.get(p.id) || 0) + 1;
+      awayMessageCountRef.current.set(p.id, count);
+      // Trigger on first message and every 5th after that
+      if (count === 1 || count % 5 === 0) {
+        newAwayMessages.push({
+          id: `away-${p.id}-${Date.now()}`,
+          senderId: p.id,
+          senderName: p.screen_name || 'Unknown',
+          content: p.away_message || '',
+          timestamp: awayTimestamp
+        });
+      }
     });
 
     // For self-chat, also show own away message if away
     if (isSelfChat && profile?.status === 'away' && profile?.away_message) {
-      newAwayMessages.push({
-        id: `away-${currentUserId}-${Date.now()}`,
-        senderId: currentUserId,
-        senderName: profile.screen_name || 'Me',
-        content: profile.away_message,
-        timestamp: awayTimestamp
-      });
+      const count = (awayMessageCountRef.current.get(currentUserId) || 0) + 1;
+      awayMessageCountRef.current.set(currentUserId, count);
+      if (count === 1 || count % 5 === 0) {
+        newAwayMessages.push({
+          id: `away-${currentUserId}-${Date.now()}`,
+          senderId: currentUserId,
+          senderName: profile.screen_name || 'Me',
+          content: profile.away_message,
+          timestamp: awayTimestamp
+        });
+      }
     }
 
     if (newAwayMessages.length > 0) {
       setTimeout(() => {
-        if (isSelfChat) {
-          // Self-chat: add directly to local state (broadcast won't echo back to sender)
-          setAwayMessages(prev => {
-            const newEntries = newAwayMessages.filter(msg => !prev.some(a => a.id === msg.id));
-            return [...prev, ...newEntries];
-          });
-        } else {
-          // Broadcast away messages so both sides see them
+        // Add to local state (sender sees it)
+        setAwayMessages(prev => {
+          const newEntries = newAwayMessages.filter(msg => !prev.some(a => a.id === msg.id));
+          return [...prev, ...newEntries];
+        });
+        // Also broadcast so the away user sees it too
+        if (!isSelfChat) {
           newAwayMessages.forEach(msg => {
             channelRef.current?.send({
               type: 'broadcast',
@@ -2181,6 +2212,23 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
             })()}
           </div>
         )}
+        {/* Status indicator for DM conversations */}
+        {!conversation.is_group && !isSelfChat && otherParticipants[0] && (
+          (otherParticipants[0].status === 'offline' || !otherParticipants[0].status) ? (
+            <div className="flex items-center gap-2 my-2">
+              <div className="flex-1 border-t border-gray-300" />
+              <span className="text-xs text-gray-400 px-1">{otherParticipants[0].screen_name} is offline</span>
+              <div className="flex-1 border-t border-gray-300" />
+            </div>
+          ) : justCameOnline ? (
+            <div className="flex items-center gap-2 my-2">
+              <div className="flex-1 border-t border-gray-300" />
+              <span className="text-xs text-gray-400 px-1">{otherParticipants[0].screen_name} is online</span>
+              <div className="flex-1 border-t border-gray-300" />
+            </div>
+          ) : null
+        )}
+
         {/* Typing Indicator */}
         {typingUsers.length > 0 && (
           <div className="flex items-center gap-1 text-gray-500 py-0.5">
