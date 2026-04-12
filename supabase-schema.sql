@@ -1,4 +1,4 @@
--- Avatar AIM Database Schema
+-- BuddyList Database Schema
 
 -- Profiles table (extends auth.users)
 CREATE TABLE profiles (

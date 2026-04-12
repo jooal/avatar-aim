@@ -1,8 +1,8 @@
 {
-  "name": "avatar-aim",
-  "productName": "Avatar AIM",
-  "version": "1.3.0",
-  "description": "A nostalgic AIM-style chat application with buddy lists and classic vibes",
+  "name": "buddylist",
+  "productName": "BuddyList",
+  "version": "2.0.0",
+  "description": "We brought AIM back. Buddy lists, away messages, door sounds, and instant messaging.",
   "main": ".vite/build/main.js",
   "private": true,
   "scripts": {

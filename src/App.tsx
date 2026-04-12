@@ -245,7 +245,7 @@ function App() {
                   <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-aim-yellow mb-2">
                     <span className="text-3xl">😎</span>
                   </div>
-                  <h1 className="text-lg font-bold text-gray-800">Avatar AIM</h1>
+                  <h1 className="text-lg font-bold text-gray-800">BuddyList</h1>
                 </div>
 
                 {view === 'login' ? (

@@ -11,34 +11,34 @@ import { FuseV1Options, FuseVersion } from '@electron/fuses';
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
-    name: 'Avatar AIM',
-    executableName: 'avatar-aim',
-    appBundleId: 'com.avataraim.app',
+    name: 'BuddyList',
+    executableName: 'buddylist',
+    appBundleId: 'com.buddylist.app',
     appCategoryType: 'public.app-category.social-networking',
   },
   rebuildConfig: {},
   makers: [
     new MakerSquirrel({
-      name: 'AvatarAIM',
-      setupExe: 'AvatarAIM-Setup.exe',
+      name: 'BuddyList',
+      setupExe: 'BuddyList-Setup.exe',
     }),
     new MakerZIP({}, ['darwin']),
     new MakerDMG({
-      name: 'AvatarAIM',
+      name: 'BuddyList',
       format: 'ULFO',
     }),
     new MakerDeb({
       options: {
-        name: 'avatar-aim',
-        productName: 'Avatar AIM',
+        name: 'buddylist',
+        productName: 'BuddyList',
         genericName: 'Chat Application',
         categories: ['Network', 'Chat'],
       },
     }),
     new MakerRpm({
       options: {
-        name: 'avatar-aim',
-        productName: 'Avatar AIM',
+        name: 'buddylist',
+        productName: 'BuddyList',
       },
     }),
   ],
