@@ -34,5 +34,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data);
     ipcRenderer.on('avatar-position-update', handler);
     return () => { ipcRenderer.removeListener('avatar-position-update', handler); };
-  }
+  },
+  onBeforeQuit: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('before-quit', handler);
+    return () => { ipcRenderer.removeListener('before-quit', handler); };
+  },
+  signoffComplete: () => {
+    ipcRenderer.send('signoff-complete');
+  },
 });

@@ -803,6 +803,22 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
     return () => document.removeEventListener('click', handleClickOutside);
   }, [showAvatarPicker]);
 
+  // Handle app quit — set user offline before quitting
+  useEffect(() => {
+    const unsubscribe = window.electronAPI?.onBeforeQuit(async () => {
+      try {
+        await supabase
+          .from('profiles')
+          .update({ status: 'offline' })
+          .eq('id', user.id);
+      } catch (e) {
+        console.log('Failed to set offline on quit:', e);
+      }
+      window.electronAPI?.signoffComplete();
+    });
+    return unsubscribe;
+  }, [user.id]);
+
   // Close My AIM menu when clicking outside
   useEffect(() => {
     if (!showMyAimMenu) return;

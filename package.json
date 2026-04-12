@@ -1,7 +1,7 @@
 {
   "name": "avatar-aim",
   "productName": "Avatar AIM",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A nostalgic AIM-style chat application with buddy lists and classic vibes",
   "main": ".vite/build/main.js",
   "private": true,

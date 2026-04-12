@@ -199,6 +199,32 @@ app.on('web-contents-created', (_event, contents) => {
 
 app.on('ready', createWindow);
 
+// Track if we're already signing off to avoid infinite loop
+let isSigningOff = false;
+
+// Allow renderer to signal that offline update is complete
+ipcMain.on('signoff-complete', () => {
+  isSigningOff = false;
+  app.quit();
+});
+
+// Set user offline in Supabase before the app actually quits
+app.on('before-quit', (event) => {
+  if (isSigningOff) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    event.preventDefault();
+    isSigningOff = true;
+    mainWindow.webContents.send('before-quit');
+    // Safety timeout: if renderer doesn't respond in 2 seconds, quit anyway
+    setTimeout(() => {
+      if (isSigningOff) {
+        isSigningOff = false;
+        app.quit();
+      }
+    }, 2000);
+  }
+});
+
 // Quit when all windows are closed, except on macOS. There, it's common
 // for applications and their menu bar to stay active until the user quits
 // explicitly with Cmd + Q.
