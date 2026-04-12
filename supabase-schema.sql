@@ -92,7 +92,7 @@ CREATE POLICY "Users can view conversations they're part of" ON conversations
   );
 
 CREATE POLICY "Users can create conversations" ON conversations
-  FOR INSERT WITH CHECK (true);
+  FOR INSERT WITH CHECK (auth.uid() IS NOT NULL);
 
 -- RLS Policies for conversation_participants
 CREATE POLICY "Users can view participants of their conversations" ON conversation_participants
@@ -101,7 +101,15 @@ CREATE POLICY "Users can view participants of their conversations" ON conversati
   );
 
 CREATE POLICY "Users can add participants" ON conversation_participants
-  FOR INSERT WITH CHECK (true);
+  FOR INSERT WITH CHECK (
+    auth.uid() IS NOT NULL
+    AND (
+      -- User can add themselves to any conversation
+      user_id = auth.uid()
+      -- Or user can add others to conversations they're already in
+      OR conversation_id IN (SELECT conversation_id FROM conversation_participants WHERE user_id = auth.uid())
+    )
+  );
 
 -- RLS Policies for messages
 CREATE POLICY "Users can view messages in their conversations" ON messages
