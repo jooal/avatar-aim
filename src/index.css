@@ -70,7 +70,7 @@ body {
   font-size: 14px;
 }
 
-.win-input:focus {
+.win-input:focus, .win-sunken:focus {
   outline: none;
   border-color: #0A246A #B4C7DC #B4C7DC #0A246A;
 }
@@ -113,6 +113,11 @@ body {
   border: 2px solid;
   border-color: #ffffff #808080 #808080 #ffffff;
   height: 16px;
+}
+
+/* Remove default focus outline on editable areas */
+[contenteditable]:focus {
+  outline: none;
 }
 
 /* Clickable links in messages */

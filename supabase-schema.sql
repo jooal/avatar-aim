@@ -142,6 +142,8 @@ CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION handle_new_user();
 
--- Enable Realtime for messages (for live chat)
+-- Enable Realtime
 ALTER PUBLICATION supabase_realtime ADD TABLE messages;
 ALTER PUBLICATION supabase_realtime ADD TABLE profiles;
+ALTER PUBLICATION supabase_realtime ADD TABLE friends;
+ALTER PUBLICATION supabase_realtime ADD TABLE conversation_participants;

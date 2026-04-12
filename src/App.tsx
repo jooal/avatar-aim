@@ -267,9 +267,10 @@ function App() {
 }
 
 function LoginForm({ onSwitch, onReset }: { onSwitch: () => void; onReset: () => void }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [email, setEmail] = useState(() => localStorage.getItem('buddylist_email') || '');
+  const [password, setPassword] = useState(() => localStorage.getItem('buddylist_pw') || '');
   const [showPassword, setShowPassword] = useState(false);
+  const [savePassword, setSavePassword] = useState(() => !!localStorage.getItem('buddylist_pw'));
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -282,6 +283,15 @@ function LoginForm({ onSwitch, onReset }: { onSwitch: () => void; onReset: () =>
 
     if (error) {
       setError(error.message);
+    } else {
+      // Save or clear credentials based on checkbox
+      if (savePassword) {
+        localStorage.setItem('buddylist_email', email);
+        localStorage.setItem('buddylist_pw', password);
+      } else {
+        localStorage.removeItem('buddylist_email');
+        localStorage.removeItem('buddylist_pw');
+      }
     }
     setLoading(false);
   };
@@ -325,7 +335,13 @@ function LoginForm({ onSwitch, onReset }: { onSwitch: () => void; onReset: () =>
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <input type="checkbox" id="save-pw" className="accent-aim-yellow" />
+        <input type="checkbox" id="save-pw" className="accent-aim-yellow" checked={savePassword} onChange={(e) => {
+          setSavePassword(e.target.checked);
+          if (!e.target.checked) {
+            localStorage.removeItem('buddylist_email');
+            localStorage.removeItem('buddylist_pw');
+          }
+        }} />
         <label htmlFor="save-pw" className="text-xs text-gray-600">Save password</label>
       </div>
       <button
@@ -781,6 +797,8 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
   setProfile: (p: Profile | null) => void;
 }) {
   const [friends, setFriends] = useState<Friend[]>([]);
+  const friendsRef = useRef<Friend[]>([]);
+  useEffect(() => { friendsRef.current = friends; }, [friends]);
   const [pendingRequests, setPendingRequests] = useState<Friend[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [showAddFriend, setShowAddFriend] = useState(false);
@@ -926,11 +944,12 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
         const updatedProfile = payload.new as Profile;
         const previousStatus = previousStatusesRef.current.get(updatedProfile.id);
 
-        // Play sound effects for friend status changes (not for self)
-        if (updatedProfile.id !== user.id && previousStatus) {
-          if (previousStatus !== 'online' && updatedProfile.status === 'online') {
+        // Play door sounds only for friends (not all users)
+        const isFriend = friendsRef.current.some(f => f.profile?.id === updatedProfile.id);
+        if (isFriend && updatedProfile.id !== user.id && previousStatus) {
+          // Sign on: offline → online
+          if ((previousStatus === 'offline' || !previousStatus) && updatedProfile.status === 'online') {
             playSignOnSound();
-            // Add to recently signed on set and remove after 3 seconds
             setRecentlySignedOn(prev => new Set(prev).add(updatedProfile.id));
             const timeout = setTimeout(() => {
               setRecentlySignedOn(prev => {
@@ -941,7 +960,8 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
               signOnTimeouts.current.delete(timeout);
             }, 3000);
             signOnTimeouts.current.add(timeout);
-          } else if (previousStatus === 'online' && updatedProfile.status !== 'online') {
+          // Sign off: online or away → offline (includes going invisible)
+          } else if (previousStatus !== 'offline' && updatedProfile.status === 'offline') {
             playSignOffSound();
           }
         }
@@ -962,6 +982,19 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
         if (updatedProfile.id === user.id) {
           setProfile(updatedProfile);
         }
+      })
+      .subscribe();
+
+    // Subscribe to conversation_participants changes (e.g. added to a group chat)
+    const convParticipantsChannel = supabase
+      .channel(`conv-participants-${user.id}`)
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'conversation_participants',
+        filter: `user_id=eq.${user.id}`
+      }, () => {
+        loadConversations();
       })
       .subscribe();
 
@@ -1019,6 +1052,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
     return () => {
       supabase.removeChannel(friendsChannel);
       supabase.removeChannel(profilesChannel);
+      supabase.removeChannel(convParticipantsChannel);
       supabase.removeChannel(messagesChannel);
       signOnTimeouts.current.forEach(t => clearTimeout(t));
       signOnTimeouts.current.clear();
@@ -1489,6 +1523,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                               key={convo.id}
                               onClick={() => window.electronAPI?.openChatWindow(convo.id, convo.name || 'Group Chat')}
                               className="w-full py-0.5 px-5 hover:bg-[#316AC5] hover:text-white transition-colors text-left flex items-center gap-1.5"
+                              title={convo.participants?.map(p => p.screen_name).join(', ') || ''}
                             >
                               <span className="text-xs">👥</span>
                               <span className="text-sm text-gray-800">
@@ -1617,7 +1652,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
               {viewingProfile.away_message && (
                 <div className="win-sunken bg-white p-2 text-xs text-left mb-3">
                   <div className="text-gray-500 text-xs mb-1 font-bold">Away Message:</div>
-                  <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(viewingProfile.away_message) }} />
+                  <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(processAwayMessageSpecialChars(viewingProfile.away_message, profile?.screen_name)) }} />
                 </div>
               )}
               <div className="flex gap-2">
@@ -2117,6 +2152,13 @@ function ChatArea({ conversation, messages, currentUserId, profile, loadingMessa
     <div className="flex-1 flex flex-col bg-win-gray overflow-hidden">
       {/* Messages area */}
       <div className="flex-1 min-h-0 overflow-y-auto bg-white win-sunken m-1 p-2" style={{ fontSize: 'medium' }}>
+        {/* Group chat members header */}
+        {conversation.is_group && conversation.participants && conversation.participants.length > 0 && (
+          <div className="text-center text-xs text-gray-400 mb-2">
+            {conversation.participants.map(p => p.screen_name).join(', ')}
+          </div>
+        )}
+
         {loadingMessages ? (
           <div className="flex items-center justify-center h-full">
             <p className="text-gray-500 text-xs">Loading messages...</p>
