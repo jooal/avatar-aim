@@ -192,8 +192,8 @@ function App() {
     setProfile(data);
     setLoading(false);
 
-    // Set user online when they log in
-    if (data) {
+    // Only set online if currently offline (don't override manual away status)
+    if (data && data.status === 'offline') {
       await supabase
         .from('profiles')
         .update({ status: 'online' })
@@ -589,16 +589,27 @@ function ChatWindow({ conversationId, user, profile: initialProfile }: {
     }
     loadFreshProfile();
 
-    // Subscribe to profile changes
+    // Subscribe to ALL profile changes so we see when other participants go away/online
     const channel = supabase
-      .channel(`profile-${user.id}`)
+      .channel(`profile-changes-${user.id}`)
       .on('postgres_changes', {
         event: 'UPDATE',
         schema: 'public',
         table: 'profiles',
-        filter: `id=eq.${user.id}`
       }, (payload) => {
-        setFreshProfile(payload.new as Profile);
+        const updatedProfile = payload.new as Profile;
+        if (updatedProfile.id === user.id) {
+          setFreshProfile(updatedProfile);
+        }
+        // Update the participant in the conversation state too
+        setConversation(prev => {
+          if (!prev || !prev.participants) return prev;
+          const idx = prev.participants.findIndex(p => p.id === updatedProfile.id);
+          if (idx === -1) return prev;
+          const newParticipants = [...prev.participants];
+          newParticipants[idx] = updatedProfile;
+          return { ...prev, participants: newParticipants };
+        });
       })
       .subscribe();
 
@@ -775,7 +786,10 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
   const [showAddFriend, setShowAddFriend] = useState(false);
   const [showMyAimMenu, setShowMyAimMenu] = useState(false);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
-  const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
+  const [viewingProfileId, setViewingProfileId] = useState<string | null>(null);
+  const viewingProfile = viewingProfileId
+    ? friends.find(f => f.profile?.id === viewingProfileId)?.profile || null
+    : null;
   const [showAwayMessage, setShowAwayMessage] = useState(false);
   const [showAvatarPicker, setShowAvatarPicker] = useState(false);
   const [loadingFriends, setLoadingFriends] = useState(true);
@@ -1437,7 +1451,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                               friend={friend}
                               onMessage={() => {
                               if (friend.profile?.status === 'away') {
-                                setViewingProfile(friend.profile);
+                                setViewingProfileId(friend.profile.id);
                               } else if (friend.profile) {
                                 startDirectMessage(friend.profile.id);
                               }
@@ -1517,7 +1531,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                               friend={friend}
                               onMessage={() => {
                               if (friend.profile?.status === 'away') {
-                                setViewingProfile(friend.profile);
+                                setViewingProfileId(friend.profile.id);
                               } else if (friend.profile) {
                                 startDirectMessage(friend.profile.id);
                               }
@@ -1589,7 +1603,7 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
           <div className="bg-win-gray win-raised w-full max-w-xs">
             <div className="win-titlebar justify-between">
               <span className="text-xs">Buddy Info</span>
-              <button onClick={() => setViewingProfile(null)} className="text-white hover:bg-red-500 px-1.5 text-xs leading-none">x</button>
+              <button onClick={() => setViewingProfileId(null)} className="text-white hover:bg-red-500 px-1.5 text-xs leading-none">x</button>
             </div>
             <div className="p-4 text-center">
               <div className="inline-flex items-center justify-center w-16 h-16 rounded bg-aim-yellow text-3xl mb-2" style={{ border: '2px solid #808080' }}>
@@ -1597,8 +1611,8 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
               </div>
               <div className="text-sm font-bold text-gray-800 mb-1">{viewingProfile.screen_name}</div>
               <div className="flex items-center justify-center gap-1 mb-3">
-                <span className="w-2 h-2 rounded-full bg-yellow-500"></span>
-                <span className="text-xs text-gray-500">Away</span>
+                <span className={`w-2 h-2 rounded-full ${getStatusColor(viewingProfile.status as Status)}`}></span>
+                <span className="text-xs text-gray-500 capitalize">{viewingProfile.status || 'offline'}</span>
               </div>
               {viewingProfile.away_message && (
                 <div className="win-sunken bg-white p-2 text-xs text-left mb-3">
@@ -1610,14 +1624,14 @@ function BuddyList({ user, profile, onLogout, setProfile }: {
                 <button
                   onClick={() => {
                     startDirectMessage(viewingProfile.id);
-                    setViewingProfile(null);
+                    setViewingProfileId(null);
                   }}
                   className="win-button flex-1 text-xs py-1"
                 >
                   Send Message
                 </button>
                 <button
-                  onClick={() => setViewingProfile(null)}
+                  onClick={() => setViewingProfileId(null)}
                   className="win-button flex-1 text-xs py-1"
                 >
                   Close
